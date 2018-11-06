@@ -96,12 +96,13 @@ func main() {
 	logger.Log("config", string(b))
 
 	client, err := tunnel.NewClient(&tunnel.ClientConfig{
-		ServerAddr:      config.ServerAddr,
-		TLSClientConfig: tlsconf,
-		Backoff:         expBackoff(config.Backoff),
-		Tunnels:         tunnels(config.Tunnels),
-		Proxy:           proxy(config.Tunnels, logger),
-		Logger:          logger,
+		ServerAddr:              config.ServerAddr,
+		ServerHeartbeatInterval: config.ServerHeartbeatInterval,
+		TLSClientConfig:         tlsconf,
+		Backoff:                 expBackoff(config.Backoff),
+		Tunnels:                 tunnels(config.Tunnels),
+		Proxy:                   proxy(config.Tunnels, logger),
+		Logger:                  logger,
 	})
 	if err != nil {
 		fatal("failed to create client: %s", err)

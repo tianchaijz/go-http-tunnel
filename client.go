@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -40,6 +41,8 @@ type ClientConfig struct {
 	Proxy ProxyFunc
 	// Logger is optional logger. If nil logging is disabled.
 	Logger log.Logger
+
+	ServerHeartbeatInterval time.Duration
 }
 
 // Client is responsible for creating connection to the server, handling control
@@ -52,8 +55,11 @@ type Client struct {
 	connMu         sync.Mutex
 	httpServer     *http2.Server
 	serverErr      error
+	lastHeartbeat  time.Time
 	lastDisconnect time.Time
 	logger         log.Logger
+	exited         chan bool
+	started        int32
 }
 
 // NewClient creates a new unconnected Client based on configuration. Caller
@@ -81,16 +87,53 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		config:     config,
 		httpServer: &http2.Server{},
 		logger:     logger,
+		exited:     make(chan bool, 1),
+		started:    0,
 	}
 
 	return c, nil
+}
+
+func (c *Client) Start() error {
+	ticker := time.NewTicker(5 * time.Second)
+
+	c.exited <- true
+
+	for {
+		select {
+		case <-c.exited:
+			go c.start()
+		case <-ticker.C:
+			c.connMu.Lock()
+			if time.Now().Sub(c.lastHeartbeat) > 2*c.config.ServerHeartbeatInterval {
+				if c.conn != nil {
+					c.logger.Log(
+						"level", 1,
+						"action", "closing stale connection",
+					)
+
+					c.conn.Close()
+				}
+			}
+			c.connMu.Unlock()
+		}
+	}
 }
 
 // Start connects client to the server, it returns error if there is a
 // connection error, or server cannot open requested tunnels. On connection
 // error a backoff policy is used to reestablish the connection. When connected
 // HTTP/2 server is started to handle ControlMessages.
-func (c *Client) Start() error {
+func (c *Client) start() error {
+	if !atomic.CompareAndSwapInt32(&c.started, 0, 1) {
+		return nil
+	}
+
+	defer func() {
+		atomic.StoreInt32(&c.started, 0)
+		c.exited <- true
+	}()
+
 	c.logger.Log(
 		"level", 1,
 		"action", "start",
@@ -143,7 +186,9 @@ func (c *Client) connect() (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to server: %s", err)
 	}
+
 	c.conn = conn
+	c.lastHeartbeat = time.Now()
 
 	return conn, nil
 }
@@ -234,6 +279,8 @@ func (c *Client) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		if r.Header.Get(proto.HeaderError) != "" {
 			c.handleHandshakeError(w, r)
+		} else if r.Header.Get(proto.HeaderHeartbeat) != "" {
+			c.handleHeartbeat(w, r)
 		} else {
 			c.handleHandshake(w, r)
 		}
@@ -307,6 +354,12 @@ func (c *Client) handleHandshake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Write(b)
+}
+
+func (c *Client) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	c.lastHeartbeat = time.Now()
+
+	w.WriteHeader(http.StatusOK)
 }
 
 // Stop disconnects client from server.

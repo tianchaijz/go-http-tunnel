@@ -11,7 +11,8 @@ import (
 
 // Protocol HTTP headers.
 const (
-	HeaderError = "X-Error"
+	HeaderError     = "X-Error"
+	HeaderHeartbeat = "X-Heartbeat"
 
 	HeaderAction         = "X-Action"
 	HeaderForwardedHost  = "X-Forwarded-Host"

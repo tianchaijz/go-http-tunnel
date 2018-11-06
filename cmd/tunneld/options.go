@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 )
 
 const usage1 string = `Usage: tunneld [OPTIONS]
@@ -37,15 +38,16 @@ func init() {
 
 // options specify arguments read command line arguments.
 type options struct {
-	httpAddr   string
-	httpsAddr  string
-	tunnelAddr string
-	tlsCrt     string
-	tlsKey     string
-	rootCA     string
-	clients    string
-	logLevel   int
-	version    bool
+	httpAddr          string
+	httpsAddr         string
+	tunnelAddr        string
+	tlsCrt            string
+	tlsKey            string
+	rootCA            string
+	clients           string
+	logLevel          int
+	version           bool
+	heartbeatInterval time.Duration
 }
 
 func parseArgs() *options {
@@ -58,17 +60,20 @@ func parseArgs() *options {
 	clients := flag.String("clients", "", "Comma-separated list of tunnel client ids, if empty accept all clients")
 	logLevel := flag.Int("log-level", 1, "Level of messages to log, 0-3")
 	version := flag.Bool("version", false, "Prints tunneld version")
+	heartbeatInterval := flag.Duration("heartbeat-interval", 5*time.Second, "heartbeat interval to cient")
+
 	flag.Parse()
 
 	return &options{
-		httpAddr:   *httpAddr,
-		httpsAddr:  *httpsAddr,
-		tunnelAddr: *tunnelAddr,
-		tlsCrt:     *tlsCrt,
-		tlsKey:     *tlsKey,
-		rootCA:     *rootCA,
-		clients:    *clients,
-		logLevel:   *logLevel,
-		version:    *version,
+		httpAddr:          *httpAddr,
+		httpsAddr:         *httpsAddr,
+		tunnelAddr:        *tunnelAddr,
+		tlsCrt:            *tlsCrt,
+		tlsKey:            *tlsKey,
+		rootCA:            *rootCA,
+		clients:           *clients,
+		logLevel:          *logLevel,
+		version:           *version,
+		heartbeatInterval: *heartbeatInterval,
 	}
 }

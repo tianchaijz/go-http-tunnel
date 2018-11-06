@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"strings"
@@ -38,6 +39,8 @@ type ServerConfig struct {
 	Listener net.Listener
 	// Logger is optional logger. If nil logging is disabled.
 	Logger log.Logger
+
+	HeartbeatInterval time.Duration
 }
 
 // Server is responsible for proxying public connections to the client over a
@@ -103,16 +106,17 @@ func listener(config *ServerConfig) (net.Listener, error) {
 // disconnected clears resources used by client, it's invoked by connection pool
 // when client goes away.
 func (s *Server) disconnected(identifier id.ID) {
+	i := s.registry.clear(identifier)
+	if i == nil {
+		return
+	}
+
 	s.logger.Log(
 		"level", 1,
 		"action", "disconnected",
 		"identifier", identifier,
 	)
 
-	i := s.registry.clear(identifier)
-	if i == nil {
-		return
-	}
 	for _, l := range i.Listeners {
 		s.logger.Log(
 			"level", 2,
@@ -317,6 +321,62 @@ func (s *Server) handleClient(conn net.Conn) {
 		"level", 1,
 		"action", "connected",
 	)
+
+	go func() {
+		heartbeat := func() error {
+			var (
+				req  *http.Request
+				resp *http.Response
+				err  error
+			)
+
+			ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
+			defer cancel()
+
+			req, err = http.NewRequest(http.MethodConnect, s.connPool.URL(identifier), nil)
+			if err != nil {
+				goto failed
+			}
+
+			req.Header.Set(proto.HeaderHeartbeat, "ping")
+
+			resp, err = s.httpClient.Do(req.WithContext(ctx))
+			if err != nil {
+				goto failed
+			}
+			defer ioutil.ReadAll(resp.Body)
+
+			if resp.StatusCode != http.StatusOK {
+				err = fmt.Errorf("Status %s", resp.Status)
+				goto failed
+			}
+
+			return nil
+
+		failed:
+			s.logger.Log(
+				"level", 2,
+				"action", "client error heartbeat failed",
+				"identifier", identifier,
+				"err", err,
+			)
+
+			return err
+		}
+
+		ticker := time.NewTicker(s.config.HeartbeatInterval)
+
+		for _ = range ticker.C {
+			if !s.IsSubscribed(identifier) {
+				return
+			}
+
+			if err := heartbeat(); err != nil {
+				s.disconnected(identifier)
+				return
+			}
+		}
+	}()
 
 	return
 

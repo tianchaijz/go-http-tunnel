@@ -41,10 +41,11 @@ func main() {
 
 	// setup server
 	server, err := tunnel.NewServer(&tunnel.ServerConfig{
-		Addr:          opts.tunnelAddr,
-		AutoSubscribe: autoSubscribe,
-		TLSConfig:     tlsconf,
-		Logger:        logger,
+		Addr:              opts.tunnelAddr,
+		HeartbeatInterval: opts.heartbeatInterval,
+		AutoSubscribe:     autoSubscribe,
+		TLSConfig:         tlsconf,
+		Logger:            logger,
 	})
 	if err != nil {
 		fatal("failed to create server: %s", err)

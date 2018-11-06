@@ -23,6 +23,10 @@ const (
 	DefaultBackoffMaxTime     = 15 * time.Minute
 )
 
+const (
+	DefaultServerHeartbeatInterval = 5 * time.Second
+)
+
 // BackoffConfig defines behavior of staggering reconnection retries.
 type BackoffConfig struct {
 	Interval    time.Duration `yaml:"interval"`
@@ -42,12 +46,13 @@ type Tunnel struct {
 
 // ClientConfig is a tunnel client configuration.
 type ClientConfig struct {
-	ServerAddr string             `yaml:"server_addr"`
-	TLSCrt     string             `yaml:"tls_crt"`
-	TLSKey     string             `yaml:"tls_key"`
-	RootCA     string             `yaml:"root_ca"`
-	Backoff    BackoffConfig      `yaml:"backoff"`
-	Tunnels    map[string]*Tunnel `yaml:"tunnels"`
+	ServerAddr              string             `yaml:"server_addr"`
+	ServerHeartbeatInterval time.Duration      `yaml:"server_heartbeart_interval"`
+	TLSCrt                  string             `yaml:"tls_crt"`
+	TLSKey                  string             `yaml:"tls_key"`
+	RootCA                  string             `yaml:"root_ca"`
+	Backoff                 BackoffConfig      `yaml:"backoff"`
+	Tunnels                 map[string]*Tunnel `yaml:"tunnels"`
 }
 
 func loadClientConfigFromFile(file string) (*ClientConfig, error) {
@@ -57,6 +62,8 @@ func loadClientConfigFromFile(file string) (*ClientConfig, error) {
 	}
 
 	c := ClientConfig{
+		ServerHeartbeatInterval: DefaultServerHeartbeatInterval,
+
 		TLSCrt: filepath.Join(filepath.Dir(file), "client.crt"),
 		TLSKey: filepath.Join(filepath.Dir(file), "client.key"),
 		Backoff: BackoffConfig{
