@@ -103,10 +103,22 @@ func listener(config *ServerConfig) (net.Listener, error) {
 	return net.Listen("tcp", config.Addr)
 }
 
+func (s *Server) doDisconnect(identifier id.ID, i *RegistryItem) {
+	for _, l := range i.Listeners {
+		s.logger.Log(
+			"level", 2,
+			"action", "close listener",
+			"identifier", identifier,
+			"addr", l.Addr(),
+		)
+		l.Close()
+	}
+}
+
 // disconnected clears resources used by client, it's invoked by connection pool
 // when client goes away.
 func (s *Server) disconnected(identifier id.ID) {
-	i := s.registry.clear(identifier)
+	i := s.registry.clear(identifier, "")
 	if i == nil {
 		return
 	}
@@ -117,15 +129,23 @@ func (s *Server) disconnected(identifier id.ID) {
 		"identifier", identifier,
 	)
 
-	for _, l := range i.Listeners {
-		s.logger.Log(
-			"level", 2,
-			"action", "close listener",
-			"identifier", identifier,
-			"addr", l.Addr(),
-		)
-		l.Close()
+	s.doDisconnect(identifier, i)
+}
+
+func (s *Server) disconnectedWithTag(identifier id.ID, tag string) {
+	i := s.registry.clear(identifier, tag)
+	if i == nil {
+		return
 	}
+
+	s.logger.Log(
+		"level", 1,
+		"action", "disconnected",
+		"identifier", identifier,
+		"tag", tag,
+	)
+
+	s.doDisconnect(identifier, i)
 }
 
 // Start starts accepting connections form clients. For accepting http traffic
@@ -190,6 +210,8 @@ func (s *Server) handleClient(conn net.Conn) {
 		ok         bool
 
 		inConnPool bool
+
+		tag string = time.Now().String()
 	)
 
 	tlsConn, ok := conn.(*tls.Conn)
@@ -308,7 +330,7 @@ func (s *Server) handleClient(conn net.Conn) {
 		goto reject
 	}
 
-	if err = s.addTunnels(tunnels, identifier); err != nil {
+	if err = s.addTunnels(tunnels, identifier, tag); err != nil {
 		logger.Log(
 			"level", 2,
 			"msg", "handshake failed",
@@ -372,7 +394,7 @@ func (s *Server) handleClient(conn net.Conn) {
 			}
 
 			if err := heartbeat(); err != nil {
-				s.disconnected(identifier)
+				s.disconnectedWithTag(identifier, tag)
 				return
 			}
 		}
@@ -421,8 +443,9 @@ func (s *Server) notifyError(serverError error, identifier id.ID) {
 
 // addTunnels invokes addHost or addListener based on data from proto.Tunnel. If
 // a tunnel cannot be added whole batch is reverted.
-func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, identifier id.ID) error {
+func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, identifier id.ID, tag string) error {
 	i := &RegistryItem{
+		Tag:       tag,
 		Hosts:     []*HostAuth{},
 		Listeners: []net.Listener{},
 	}
