@@ -16,6 +16,7 @@ import (
 // RegistryItem holds information about hosts and listeners associated with a
 // client.
 type RegistryItem struct {
+	Tag       string
 	Hosts     []*HostAuth
 	Listeners []net.Listener
 }
@@ -159,7 +160,7 @@ func (r *registry) set(i *RegistryItem, identifier id.ID) error {
 	return nil
 }
 
-func (r *registry) clear(identifier id.ID) *RegistryItem {
+func (r *registry) clear(identifier id.ID, tag string) *RegistryItem {
 	r.logger.Log(
 		"level", 2,
 		"action", "clear registry item",
@@ -170,7 +171,7 @@ func (r *registry) clear(identifier id.ID) *RegistryItem {
 	defer r.mu.Unlock()
 
 	i, ok := r.items[identifier]
-	if !ok || i == voidRegistryItem {
+	if !ok || i == voidRegistryItem || (tag != "" && i.Tag != tag) {
 		return nil
 	}
 
