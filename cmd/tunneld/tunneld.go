@@ -43,6 +43,7 @@ func main() {
 	server, err := tunnel.NewServer(&tunnel.ServerConfig{
 		Addr:              opts.tunnelAddr,
 		HeartbeatInterval: opts.heartbeatInterval,
+		StartPort:         opts.startPort,
 		AutoSubscribe:     autoSubscribe,
 		TLSConfig:         tlsconf,
 		Logger:            logger,

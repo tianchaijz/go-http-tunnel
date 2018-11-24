@@ -48,6 +48,7 @@ type options struct {
 	logLevel          int
 	version           bool
 	heartbeatInterval time.Duration
+	startPort         uint64
 }
 
 func parseArgs() *options {
@@ -61,6 +62,7 @@ func parseArgs() *options {
 	logLevel := flag.Int("log-level", 1, "Level of messages to log, 0-3")
 	version := flag.Bool("version", false, "Prints tunneld version")
 	heartbeatInterval := flag.Duration("heartbeat-interval", 5*time.Second, "heartbeat interval to cient")
+	startPort := flag.Uint64("start-port", 20000, "start port for net listeners")
 
 	flag.Parse()
 
@@ -75,5 +77,6 @@ func parseArgs() *options {
 		logLevel:          *logLevel,
 		version:           *version,
 		heartbeatInterval: *heartbeatInterval,
+		startPort:         *startPort,
 	}
 }

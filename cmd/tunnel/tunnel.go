@@ -159,10 +159,12 @@ func tunnels(m map[string]*Tunnel) map[string]*proto.Tunnel {
 
 	for name, t := range m {
 		p[name] = &proto.Tunnel{
-			Protocol: t.Protocol,
-			Host:     t.Host,
-			Auth:     t.Auth,
-			Addr:     t.RemoteAddr,
+			Name:       name,
+			Protocol:   t.Protocol,
+			Host:       t.Host,
+			Auth:       t.Auth,
+			Addr:       t.Addr,
+			RemoteAddr: t.RemoteAddr,
 		}
 	}
 
@@ -173,7 +175,7 @@ func proxy(m map[string]*Tunnel, logger log.Logger) tunnel.ProxyFunc {
 	httpURL := make(map[string]*url.URL)
 	tcpAddr := make(map[string]string)
 
-	for _, t := range m {
+	for name, t := range m {
 		switch t.Protocol {
 		case proto.HTTP:
 			u, err := url.Parse(t.Addr)
@@ -182,7 +184,7 @@ func proxy(m map[string]*Tunnel, logger log.Logger) tunnel.ProxyFunc {
 			}
 			httpURL[t.Host] = u
 		case proto.TCP, proto.TCP4, proto.TCP6:
-			tcpAddr[t.RemoteAddr] = t.Addr
+			tcpAddr[name] = t.Addr
 		}
 	}
 

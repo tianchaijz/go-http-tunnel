@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -341,6 +342,12 @@ func (c *Client) handleHandshake(w http.ResponseWriter, r *http.Request) {
 		"action", "handshake",
 		"addr", r.RemoteAddr,
 	)
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "unknown"
+	}
+	w.Header().Set(proto.HeaderHostname, hostname)
 
 	w.WriteHeader(http.StatusOK)
 

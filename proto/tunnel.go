@@ -8,6 +8,8 @@ package proto
 // client sends tunnels to server. If client gets connected server proxies
 // connections to given Host and Addr to the client.
 type Tunnel struct {
+	// Tunnel name
+	Name string
 	// Protocol specifies tunnel protocol, must be one of protocols known
 	// by the server.
 	Protocol string
@@ -17,7 +19,9 @@ type Tunnel struct {
 	// Auth specifies HTTP basic auth credentials in form "user:password",
 	// if set server would protect HTTP and WS tunnels with basic auth.
 	Auth string
+	// Addr specifies tunnel local address
+	Addr string
 	// Addr specifies TCP address server would listen on, it's required
 	// for TCP tunnels.
-	Addr string
+	RemoteAddr string
 }

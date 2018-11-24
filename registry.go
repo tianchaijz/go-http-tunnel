@@ -8,17 +8,54 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/mmatczuk/go-http-tunnel/id"
 	"github.com/mmatczuk/go-http-tunnel/log"
 )
+
+type PortPool struct {
+	port uint64
+	pool chan uint64
+}
+
+func NewPortPool(port uint64, max int) *PortPool {
+	return &PortPool{
+		port: port,
+		pool: make(chan uint64, max),
+	}
+}
+
+func (pp *PortPool) Get() uint64 {
+	var port uint64
+	select {
+	case port = <-pp.pool:
+	default:
+		port = atomic.AddUint64(&pp.port, 1)
+	}
+	return port
+}
+
+func (pp *PortPool) Put(port uint64) {
+	select {
+	case pp.pool <- port:
+	default:
+		// let it go, let it go...
+	}
+}
+
+type Listener struct {
+	net.Listener
+	TunnelName string
+}
 
 // RegistryItem holds information about hosts and listeners associated with a
 // client.
 type RegistryItem struct {
 	Tag       string
 	Hosts     []*HostAuth
-	Listeners []net.Listener
+	Listeners []Listener
+	Ports     []uint64
 }
 
 // HostAuth holds host and authentication info.
@@ -33,21 +70,23 @@ type hostInfo struct {
 }
 
 type registry struct {
-	items  map[id.ID]*RegistryItem
-	hosts  map[string]*hostInfo
-	mu     sync.RWMutex
-	logger log.Logger
+	items    map[id.ID]*RegistryItem
+	hosts    map[string]*hostInfo
+	mu       sync.RWMutex
+	logger   log.Logger
+	portPool *PortPool
 }
 
-func newRegistry(logger log.Logger) *registry {
+func newRegistry(logger log.Logger, startPort uint64) *registry {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
 
 	return &registry{
-		items:  make(map[id.ID]*RegistryItem),
-		hosts:  make(map[string]*hostInfo),
-		logger: logger,
+		items:    make(map[id.ID]*RegistryItem),
+		hosts:    make(map[string]*hostInfo),
+		logger:   logger,
+		portPool: NewPortPool(startPort, 1024*128),
 	}
 }
 
