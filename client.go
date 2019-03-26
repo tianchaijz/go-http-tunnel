@@ -34,7 +34,8 @@ type ClientConfig struct {
 	DialTLS func(network, addr string, config *tls.Config) (net.Conn, error)
 	// Backoff specifies backoff policy on server connection retry. If nil
 	// when dial fails it will not be retried.
-	Backoff Backoff
+	DialBackoff  Backoff
+	ServeBackoff Backoff
 	// Tunnels specifies the tunnels client requests to be opened on server.
 	Tunnels map[string]*proto.Tunnel
 	// Proxy is ProxyFunc responsible for transferring data between server
@@ -141,7 +142,7 @@ func (c *Client) start() error {
 		"action", "start",
 	)
 
-	for {
+	doServe := func() error {
 		conn, err := c.connect()
 		if err != nil {
 			return err
@@ -161,7 +162,7 @@ func (c *Client) start() error {
 		err = c.serverErr
 
 		// detect disconnect hiccup
-		if err == nil && now.Sub(c.lastDisconnect).Seconds() < 5 {
+		if err == nil {
 			err = fmt.Errorf("connection is being cut")
 		}
 
@@ -170,10 +171,37 @@ func (c *Client) start() error {
 		c.lastDisconnect = now
 		c.connMu.Unlock()
 
-		if err != nil {
-			return err
-		}
+		return err
 	}
+
+	b := c.config.ServeBackoff
+	if b == nil {
+		return doServe()
+	}
+	defer b.Reset()
+
+	var err error
+
+	for {
+		err = doServe()
+
+		// failure
+		d := b.NextBackOff()
+		if d < 0 {
+			break
+		}
+
+		// backoff
+		c.logger.Log(
+			"level", 1,
+			"action", "serve backoff",
+			"sleep", d,
+			"err", err,
+		)
+		time.Sleep(d)
+	}
+
+	return fmt.Errorf("backoff limit exeded: %s", err)
 }
 
 func (c *Client) connect() (net.Conn, error) {
@@ -247,7 +275,7 @@ func (c *Client) dial() (net.Conn, error) {
 		return
 	}
 
-	b := c.config.Backoff
+	b := c.config.DialBackoff
 	if b == nil {
 		return doDial()
 	}
@@ -270,7 +298,7 @@ func (c *Client) dial() (net.Conn, error) {
 		// backoff
 		c.logger.Log(
 			"level", 1,
-			"action", "backoff",
+			"action", "dial backoff",
 			"sleep", d,
 		)
 		time.Sleep(d)
