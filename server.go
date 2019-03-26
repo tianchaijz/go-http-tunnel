@@ -399,6 +399,7 @@ func (s *Server) handleClient(conn net.Conn) {
 		}
 
 		ticker := time.NewTicker(s.config.HeartbeatInterval)
+		defer ticker.Stop()
 
 		for _ = range ticker.C {
 			if !s.IsSubscribed(identifier) {

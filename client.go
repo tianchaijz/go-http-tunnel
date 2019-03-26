@@ -97,6 +97,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 
 func (c *Client) Start() error {
 	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 
 	c.exited <- true
 
