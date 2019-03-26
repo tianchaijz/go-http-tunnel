@@ -208,7 +208,7 @@ func (s *Server) handleClient(conn net.Conn) {
 	logger := log.NewContext(s.logger).With("addr", conn.RemoteAddr())
 
 	logger.Log(
-		"level", 1,
+		"level", 3,
 		"action", "try connect",
 	)
 
@@ -417,7 +417,7 @@ func (s *Server) handleClient(conn net.Conn) {
 
 reject:
 	logger.Log(
-		"level", 1,
+		"level", 3,
 		"action", "rejected",
 	)
 
