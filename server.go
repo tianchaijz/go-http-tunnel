@@ -386,6 +386,10 @@ func (s *Server) handleClient(conn net.Conn) {
 			return err
 		}
 
+		if s.config.HeartbeatInterval <= 0 {
+			return
+		}
+
 		ticker := time.NewTicker(s.config.HeartbeatInterval)
 		defer ticker.Stop()
 
