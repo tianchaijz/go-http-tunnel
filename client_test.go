@@ -65,7 +65,7 @@ func TestClient_DialBackoff(t *testing.T) {
 		ServerAddr:      "8.8.8.8",
 		TLSClientConfig: &tls.Config{},
 		DialTLS:         d,
-		Backoff:         b,
+		DialBackoff:     b,
 		Tunnels:         map[string]*proto.Tunnel{"test": {}},
 		Proxy:           Proxy(ProxyFuncs{}),
 	})

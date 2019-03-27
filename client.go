@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -60,8 +59,6 @@ type Client struct {
 	lastHeartbeat  time.Time
 	lastDisconnect time.Time
 	logger         log.Logger
-	exited         chan bool
-	started        int32
 }
 
 // NewClient creates a new unconnected Client based on configuration. Caller
@@ -89,58 +86,24 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		config:     config,
 		httpServer: &http2.Server{},
 		logger:     logger,
-		exited:     make(chan bool, 1),
-		started:    0,
 	}
 
 	return c, nil
-}
-
-func (c *Client) Start() error {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	c.exited <- true
-
-	for {
-		select {
-		case <-c.exited:
-			go c.start()
-		case <-ticker.C:
-			c.connMu.Lock()
-			if time.Now().Sub(c.lastHeartbeat) > 2*c.config.ServerHeartbeatInterval {
-				if c.conn != nil {
-					c.logger.Log(
-						"level", 1,
-						"action", "closing stale connection",
-					)
-
-					c.conn.Close()
-				}
-			}
-			c.connMu.Unlock()
-		}
-	}
 }
 
 // Start connects client to the server, it returns error if there is a
 // connection error, or server cannot open requested tunnels. On connection
 // error a backoff policy is used to reestablish the connection. When connected
 // HTTP/2 server is started to handle ControlMessages.
-func (c *Client) start() error {
-	if !atomic.CompareAndSwapInt32(&c.started, 0, 1) {
-		return nil
-	}
-
-	defer func() {
-		atomic.StoreInt32(&c.started, 0)
-		c.exited <- true
-	}()
-
+func (c *Client) Start() error {
 	c.logger.Log(
 		"level", 1,
 		"action", "start",
 	)
+
+	if c.config.ServerHeartbeatInterval > 0 {
+		go c.checkHeartbeat()
+	}
 
 	doServe := func() error {
 		conn, err := c.connect()
@@ -202,6 +165,26 @@ func (c *Client) start() error {
 	}
 
 	return fmt.Errorf("backoff limit exeded: %s", err)
+}
+
+func (c *Client) checkHeartbeat() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for _ = range ticker.C {
+		c.connMu.Lock()
+		if time.Now().Sub(c.lastHeartbeat) > 2*c.config.ServerHeartbeatInterval {
+			if c.conn != nil {
+				c.logger.Log(
+					"level", 1,
+					"action", "closing stale connection",
+				)
+
+				c.conn.Close()
+			}
+		}
+		c.connMu.Unlock()
+	}
 }
 
 func (c *Client) connect() (net.Conn, error) {
