@@ -141,17 +141,15 @@ func (c *Client) Start() error {
 	if b == nil {
 		return doServe()
 	}
-	defer b.Reset()
-
-	var err error
 
 	for {
-		err = doServe()
+		err := doServe()
 
 		// failure
 		d := b.NextBackOff()
 		if d < 0 {
-			break
+			b.Reset()
+			continue // next round
 		}
 
 		// backoff
@@ -163,8 +161,6 @@ func (c *Client) Start() error {
 		)
 		time.Sleep(d)
 	}
-
-	return fmt.Errorf("backoff limit exeded: %s", err)
 }
 
 func (c *Client) checkHeartbeat() {
