@@ -143,11 +143,13 @@ func (c *Client) Start() error {
 	}
 
 	for {
+		t := time.Now()
+
 		err := doServe()
 
 		// failure
 		d := b.NextBackOff()
-		if d < 0 {
+		if d < 0 || time.Now().Sub(t) > 60*time.Second {
 			b.Reset()
 			continue // next round
 		}
