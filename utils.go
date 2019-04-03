@@ -16,13 +16,11 @@ import (
 func transfer(dst io.Writer, src io.Reader, logger log.Logger) {
 	n, err := io.Copy(dst, src)
 	if err != nil {
-		if !strings.Contains(err.Error(), "context canceled") && !strings.Contains(err.Error(), "CANCEL") {
-			logger.Log(
-				"level", 2,
-				"msg", "copy error",
-				"err", err,
-			)
-		}
+		logger.Log(
+			"level", 2,
+			"msg", "copy error",
+			"err", err,
+		)
 	}
 
 	logger.Log(

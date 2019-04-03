@@ -100,21 +100,17 @@ func (p *TCPProxy) Proxy(w io.Writer, r io.ReadCloser, msg *proto.ControlMessage
 		)
 	}
 
-	done := make(chan struct{})
 	go func() {
 		transfer(flushWriter{w}, local, log.NewContext(p.logger).With(
 			"dst", msg.ForwardedHost,
 			"src", target,
 		))
-		close(done)
 	}()
 
 	transfer(local, r, log.NewContext(p.logger).With(
 		"dst", target,
 		"src", msg.ForwardedHost,
 	))
-
-	<-done
 }
 
 // Remote address or tunnel name
