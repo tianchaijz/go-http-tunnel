@@ -93,10 +93,10 @@ func TestConnPoolProbeAllowsOtherClients(t *testing.T) {
 				gate = gatePoolWrites(t, conn, poolPingFrame(true))
 				return gate
 			})
-			if err := p.AddConn(slow, slowID); err != nil {
+			if _, err := p.AddConn(slow, slowID, "test"); err != nil {
 				t.Fatal(err)
 			}
-			if err := p.AddConn(poolTestConn(t, nil, nil), fastID); err != nil {
+			if _, err := p.AddConn(poolTestConn(t, nil, nil), fastID, "test"); err != nil {
 				t.Fatal(err)
 			}
 			candidate := poolTestConn(t, nil, nil)
@@ -106,7 +106,8 @@ func TestConnPoolProbeAllowsOtherClients(t *testing.T) {
 					_, err := p.Ping(slowID)
 					probe <- err
 				} else {
-					probe <- p.AddConn(candidate, slowID)
+					_, err := p.AddConn(candidate, slowID, "test")
+					probe <- err
 				}
 			}()
 			awaitPoolSignal(t, gate.entered, "peer did not attempt PING ACK")
@@ -148,7 +149,7 @@ func TestConnPoolProbeAllowsOtherClients(t *testing.T) {
 func TestConnPoolAddConnPrefaceAllowsOtherClients(t *testing.T) {
 	p := newConnPool(new(http2.Transport), nil)
 	fastID := id.New([]byte("fast"))
-	if err := p.AddConn(poolTestConn(t, nil, nil), fastID); err != nil {
+	if _, err := p.AddConn(poolTestConn(t, nil, nil), fastID, "test"); err != nil {
 		t.Fatal(err)
 	}
 	var gate *poolWriteGate
@@ -157,7 +158,7 @@ func TestConnPoolAddConnPrefaceAllowsOtherClients(t *testing.T) {
 		return gate
 	}, nil)
 	added := make(chan error, 1)
-	go func() { added <- p.AddConn(candidate, id.New([]byte("slow"))) }()
+	go func() { _, err := p.AddConn(candidate, id.New([]byte("slow")), "test"); added <- err }()
 	awaitPoolSignal(t, gate.entered, "client did not write HTTP/2 preface")
 	lookup := make(chan error, 1)
 	go func() { _, err := p.GetClientConn(nil, p.addr(fastID)); lookup <- err }()
@@ -177,25 +178,26 @@ func TestConnPoolAddConnPrefaceAllowsOtherClients(t *testing.T) {
 
 func TestConnPoolStaleProbePreservesReplacement(t *testing.T) {
 	var frees int
-	p := newConnPool(new(http2.Transport), func(id.ID) { frees++ })
+	p := newConnPool(new(http2.Transport), func(id.ID, string) { frees++ })
 	identifier := id.New([]byte("same"))
 	var gate *poolWriteGate
 	old := poolTestConn(t, func(conn net.Conn) net.Conn {
 		gate = gatePoolWrites(t, conn, poolPingFrame(false))
 		return gate
 	}, nil)
-	if err := p.AddConn(old, identifier); err != nil {
+	if _, err := p.AddConn(old, identifier, "test"); err != nil {
 		t.Fatal(err)
 	}
 	candidate := poolTestConn(t, nil, nil)
 	stale := make(chan error, 1)
-	go func() { stale <- p.AddConn(candidate, identifier) }()
+	go func() { _, err := p.AddConn(candidate, identifier, "test"); stale <- err }()
 	awaitPoolSignal(t, gate.entered, "duplicate probe did not send PING")
 	replaced := make(chan error, 1)
 	newer := poolTestConn(t, nil, nil)
 	go func() {
 		p.DeleteConn(identifier)
-		replaced <- p.AddConn(newer, identifier)
+		_, err := p.AddConn(newer, identifier, "test")
+		replaced <- err
 	}()
 	select {
 	case err := <-replaced:
@@ -231,11 +233,11 @@ func TestConnPoolConcurrentAddConnKeepsWinner(t *testing.T) {
 		return gate
 	}, nil)
 	pending := make(chan error, 1)
-	go func() { pending <- p.AddConn(candidate, identifier) }()
+	go func() { _, err := p.AddConn(candidate, identifier, "test"); pending <- err }()
 	awaitPoolSignal(t, gate.entered, "client did not write HTTP/2 preface")
 	winner := poolTestConn(t, nil, nil)
 	installed := make(chan error, 1)
-	go func() { installed <- p.AddConn(winner, identifier) }()
+	go func() { _, err := p.AddConn(winner, identifier, "test"); installed <- err }()
 	select {
 	case err := <-installed:
 		if err != nil {
@@ -281,7 +283,7 @@ func TestConnPoolAddConnRejectsClosedConnection(t *testing.T) {
 		peer.Close()
 	}()
 	added := make(chan error, 1)
-	go func() { added <- p.AddConn(gate, id.New([]byte("closed"))) }()
+	go func() { _, err := p.AddConn(gate, id.New([]byte("closed")), "test"); added <- err }()
 	awaitPoolSignal(t, gate.entered, "client did not write HTTP/2 preface")
 	if !p.mu.TryLock() {
 		t.Fatal("pool lock held during HTTP/2 preface")
@@ -296,5 +298,111 @@ func TestConnPoolAddConnRejectsClosedConnection(t *testing.T) {
 	}
 	if err := <-added; err != errClientNotConnected {
 		t.Fatalf("AddConn after peer closed = %v, want client not connected", err)
+	}
+}
+
+func TestConnPoolStaleRemovalPreservesReplacement(t *testing.T) {
+	var freed []string
+	p := newConnPool(new(http2.Transport), func(_ id.ID, tag string) { freed = append(freed, tag) })
+	defer p.Close()
+	identifier := id.New([]byte("same"))
+	old, err := p.AddConn(poolTestConn(t, nil, nil), identifier, "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.DeleteConn(identifier)
+	awaitPoolSignal(t, old.ctx.Done(), "deleted session was not canceled")
+	current, err := p.AddConn(poolTestConn(t, nil, nil), identifier, "current")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.remove(old)
+	p.MarkDead(old.clientConn)
+	if _, err := p.Ping(identifier); err != nil {
+		t.Fatalf("replacement stopped responding after stale removal: %v", err)
+	}
+	if current.ctx.Err() != nil {
+		t.Fatal("stale removal canceled replacement")
+	}
+	if len(freed) != 1 || freed[0] != "old" {
+		t.Fatalf("cleanup callbacks = %v, want [old]", freed)
+	}
+}
+
+func TestConnPoolCloseRejectsPendingAdmission(t *testing.T) {
+	p := newConnPool(new(http2.Transport), nil)
+	current, err := p.AddConn(poolTestConn(t, nil, nil), id.New([]byte("current")), "current")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gate *poolWriteGate
+	candidate := poolTestConn(t, func(conn net.Conn) net.Conn {
+		gate = gatePoolWrites(t, conn, func(b []byte) bool { return bytes.HasPrefix(b, []byte(http2.ClientPreface)) })
+		return gate
+	}, nil)
+	added := make(chan error, 1)
+	go func() {
+		_, err := p.AddConn(candidate, id.New([]byte("pending")), "pending")
+		added <- err
+	}()
+	awaitPoolSignal(t, gate.entered, "pending connection did not write HTTP/2 preface")
+	p.Close()
+	awaitPoolSignal(t, current.ctx.Done(), "pool Close did not cancel admitted session")
+	close(gate.release)
+	if err := <-added; err != errClientNotConnected {
+		t.Fatalf("pending admission after Close = %v, want client not connected", err)
+	}
+	if _, err := p.AddConn(poolTestConn(t, nil, nil), current.identifier, "late"); err != errClientNotConnected {
+		t.Fatalf("new admission after Close = %v, want client not connected", err)
+	}
+	p.Close()
+}
+
+type poolCloseGate struct {
+	net.Conn
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *poolCloseGate) Close() error {
+	c.once.Do(func() { close(c.entered); <-c.release })
+	return c.Conn.Close()
+}
+
+func TestConnPoolCloseConnectionAllowsOtherClients(t *testing.T) {
+	p := newConnPool(new(http2.Transport), nil)
+	var gate *poolCloseGate
+	conn := poolTestConn(t, func(conn net.Conn) net.Conn {
+		gate = &poolCloseGate{Conn: conn, entered: make(chan struct{}), release: make(chan struct{})}
+		return gate
+	}, nil)
+	t.Cleanup(func() {
+		select {
+		case <-gate.release:
+		default:
+			close(gate.release)
+		}
+	})
+	oldID, otherID := id.New([]byte("old")), id.New([]byte("other"))
+	if _, err := p.AddConn(conn, oldID, "old"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.AddConn(poolTestConn(t, nil, nil), otherID, "other"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); p.DeleteConn(oldID) }()
+	t.Cleanup(func() { close(gate.release); <-done })
+	awaitPoolSignal(t, gate.entered, "removed connection was not closed")
+	lookup := make(chan error, 1)
+	go func() { _, err := p.GetClientConn(nil, p.addr(otherID)); lookup <- err }()
+	select {
+	case err := <-lookup:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("unrelated client blocked while removed connection Close was gated")
 	}
 }

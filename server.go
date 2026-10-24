@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"regexp"
@@ -82,7 +81,7 @@ func NewServer(config *ServerConfig) (*Server, error) {
 	}
 
 	t := &http2.Transport{}
-	pool := newConnPool(t, s.disconnected)
+	pool := newConnPool(t, s.disconnectedWithTag)
 	t.ConnPool = pool
 	s.connPool = pool
 	s.httpClient = &http.Client{
@@ -124,23 +123,6 @@ func (s *Server) doDisconnect(identifier id.ID, i *RegistryItem) {
 	for _, port := range i.Ports {
 		s.registry.portPool.Put(port)
 	}
-}
-
-// disconnected clears resources used by client, it's invoked by connection pool
-// when client goes away.
-func (s *Server) disconnected(identifier id.ID) {
-	i := s.registry.clear(identifier, "")
-	if i == nil {
-		return
-	}
-
-	s.logger.Log(
-		"level", 1,
-		"action", "disconnected",
-		"identifier", identifier,
-	)
-
-	s.doDisconnect(identifier, i)
 }
 
 func (s *Server) disconnectedWithTag(identifier id.ID, tag string) {
@@ -214,13 +196,12 @@ func (s *Server) handleClient(conn net.Conn) {
 
 	var (
 		identifier id.ID
-		req        *http.Request
-		resp       *http.Response
 		tunnels    map[string]*proto.Tunnel
 		err        error
 		ok         bool
 
-		inConnPool bool
+		session  *connPair
+		hostname string
 
 		tag string = time.Now().String()
 	)
@@ -275,7 +256,7 @@ func (s *Server) handleClient(conn net.Conn) {
 		goto reject
 	}
 
-	if err := s.connPool.AddConn(conn, identifier); err != nil {
+	if session, err = s.connPool.AddConn(conn, identifier, tag); err != nil {
 		logger.Log(
 			"level", 2,
 			"msg", "adding connection failed",
@@ -283,25 +264,7 @@ func (s *Server) handleClient(conn net.Conn) {
 		)
 		goto reject
 	}
-	inConnPool = true
-
-	req, err = http.NewRequest(http.MethodConnect, s.connPool.URL(identifier), nil)
-	if err != nil {
-		logger.Log(
-			"level", 2,
-			"msg", "handshake request creation failed",
-			"err", err,
-		)
-		goto reject
-	}
-
-	{
-		ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
-		defer cancel()
-		req = req.WithContext(ctx)
-	}
-
-	resp, err = s.httpClient.Do(req)
+	tunnels, hostname, err = s.handshake(session)
 	if err != nil {
 		logger.Log(
 			"level", 2,
@@ -311,46 +274,7 @@ func (s *Server) handleClient(conn net.Conn) {
 		goto reject
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		err = fmt.Errorf("Status %s", resp.Status)
-		logger.Log(
-			"level", 2,
-			"msg", "handshake failed",
-			"err", err,
-		)
-		goto reject
-	}
-
-	if resp.ContentLength == 0 {
-		err = fmt.Errorf("Tunnels Content-Legth: 0")
-		logger.Log(
-			"level", 2,
-			"msg", "handshake failed",
-			"err", err,
-		)
-		goto reject
-	}
-
-	if err = json.NewDecoder(&io.LimitedReader{R: resp.Body, N: 126976}).Decode(&tunnels); err != nil {
-		logger.Log(
-			"level", 2,
-			"msg", "handshake failed",
-			"err", err,
-		)
-		goto reject
-	}
-
-	if len(tunnels) == 0 {
-		err = fmt.Errorf("No tunnels")
-		logger.Log(
-			"level", 2,
-			"msg", "handshake failed",
-			"err", err,
-		)
-		goto reject
-	}
-
-	if err = s.addTunnels(tunnels, identifier, tag); err != nil {
+	if err = s.addTunnels(tunnels, session); err != nil {
 		logger.Log(
 			"level", 2,
 			"msg", "handshake failed",
@@ -362,69 +286,10 @@ func (s *Server) handleClient(conn net.Conn) {
 	logger.Log(
 		"level", 1,
 		"action", "connected",
-		"hostname", "["+resp.Header.Get(proto.HeaderHostname)+"]",
+		"hostname", "["+hostname+"]",
 	)
 
-	go func() {
-		heartbeat := func() error {
-			var (
-				req  *http.Request
-				resp *http.Response
-				err  error
-			)
-
-			ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
-			defer cancel()
-
-			req, err = http.NewRequest(http.MethodConnect, s.connPool.URL(identifier), nil)
-			if err != nil {
-				goto failed
-			}
-
-			req.Header.Set(proto.HeaderHeartbeat, "ping")
-
-			resp, err = s.httpClient.Do(req.WithContext(ctx))
-			if err != nil {
-				goto failed
-			}
-			defer ioutil.ReadAll(resp.Body)
-
-			if resp.StatusCode != http.StatusOK {
-				err = fmt.Errorf("Status %s", resp.Status)
-				goto failed
-			}
-
-			return nil
-
-		failed:
-			s.logger.Log(
-				"level", 2,
-				"action", "client error heartbeat failed",
-				"identifier", identifier,
-				"err", err,
-			)
-
-			return err
-		}
-
-		if s.config.HeartbeatInterval <= 0 {
-			return
-		}
-
-		ticker := time.NewTicker(s.config.HeartbeatInterval)
-		defer ticker.Stop()
-
-		for _ = range ticker.C {
-			if !s.IsSubscribed(identifier) {
-				return
-			}
-
-			if err := heartbeat(); err != nil {
-				s.disconnectedWithTag(identifier, tag)
-				return
-			}
-		}
-	}()
+	go s.heartbeat(session)
 
 	return
 
@@ -434,44 +299,133 @@ reject:
 		"action", "rejected",
 	)
 
-	if inConnPool {
-		s.notifyError(err, identifier)
-		s.connPool.DeleteConn(identifier)
+	if session != nil {
+		s.notifyError(err, session)
+		s.connPool.remove(session)
 	}
 
 	conn.Close()
 }
 
+func (s *Server) handshake(session *connPair) (tunnels map[string]*proto.Tunnel, hostname string, err error) {
+	ctx, cancel := context.WithTimeout(session.ctx, DefaultTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, s.connPool.URL(session.identifier), nil)
+	if err != nil {
+		return nil, "", err
+	}
+	resp, err := session.clientConn.RoundTrip(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() {
+		if drainErr := drainResponse(resp); err == nil {
+			err = drainErr
+		}
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("Status %s", resp.Status)
+	}
+	if resp.ContentLength == 0 {
+		return nil, "", fmt.Errorf("Tunnels Content-Length: 0")
+	}
+	if err = json.NewDecoder(&io.LimitedReader{R: resp.Body, N: 126976}).Decode(&tunnels); err != nil {
+		return nil, "", err
+	}
+	if len(tunnels) == 0 {
+		return nil, "", fmt.Errorf("No tunnels")
+	}
+	return tunnels, resp.Header.Get(proto.HeaderHostname), nil
+}
+
+func drainResponse(resp *http.Response) error {
+	defer resp.Body.Close()
+	_, err := io.Copy(io.Discard, resp.Body)
+	return err
+}
+
+func (s *Server) heartbeat(session *connPair) {
+	if s.config.HeartbeatInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(s.config.HeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-session.ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.sendHeartbeat(session); err != nil {
+				s.logger.Log(
+					"level", 2,
+					"action", "client error heartbeat failed",
+					"identifier", session.identifier,
+					"err", err,
+				)
+				s.connPool.remove(session)
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) sendHeartbeat(session *connPair) error {
+	ctx, cancel := context.WithTimeout(session.ctx, DefaultTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, s.connPool.URL(session.identifier), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(proto.HeaderHeartbeat, "ping")
+	resp, err := session.clientConn.RoundTrip(req)
+	if err != nil {
+		return err
+	}
+	if err := drainResponse(resp); err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Status %s", resp.Status)
+	}
+	return nil
+}
+
 // notifyError tries to send error to client.
-func (s *Server) notifyError(serverError error, identifier id.ID) {
+func (s *Server) notifyError(serverError error, session *connPair) {
 	if serverError == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(session.ctx, DefaultTimeout)
+	defer cancel()
 
-	req, err := http.NewRequest(http.MethodConnect, s.connPool.URL(identifier), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, s.connPool.URL(session.identifier), nil)
+	if err == nil {
+		req.Header.Set(proto.HeaderError, serverError.Error())
+		var resp *http.Response
+		resp, err = session.clientConn.RoundTrip(req)
+		if err == nil {
+			err = drainResponse(resp)
+		}
+	}
 	if err != nil {
 		s.logger.Log(
 			"level", 2,
 			"action", "client error notification failed",
-			"identifier", identifier,
+			"identifier", session.identifier,
 			"err", err,
 		)
-		return
 	}
-
-	req.Header.Set(proto.HeaderError, serverError.Error())
-
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
-	defer cancel()
-
-	s.httpClient.Do(req.WithContext(ctx))
 }
 
 // addTunnels invokes addHost or addListener based on data from proto.Tunnel. If
 // a tunnel cannot be added whole batch is reverted.
-func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, identifier id.ID, tag string) error {
+func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, session *connPair) error {
+	identifier := session.identifier
 	i := &RegistryItem{
-		Tag:       tag,
+		Tag:       session.tag,
 		Hosts:     []*HostAuth{},
 		Listeners: []Listener{},
 		Ports:     []uint64{},
@@ -532,7 +486,13 @@ func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, identifier id.ID, 
 		}
 	}
 
-	err = s.set(i, identifier)
+	s.connPool.mu.Lock()
+	if s.connPool.conns[s.connPool.addr(identifier)] != session {
+		err = errClientNotConnected
+	} else {
+		err = s.set(i, identifier)
+	}
+	s.connPool.mu.Unlock()
 	if err != nil {
 		goto rollback
 	}
@@ -544,9 +504,7 @@ func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, identifier id.ID, 
 	return nil
 
 rollback:
-	for _, l := range i.Listeners {
-		l.Close()
-	}
+	s.doDisconnect(identifier, i)
 
 	return err
 }
@@ -554,8 +512,17 @@ rollback:
 // Unsubscribe removes client from registry, disconnects client if already
 // connected and returns it's RegistryItem.
 func (s *Server) Unsubscribe(identifier id.ID) *RegistryItem {
-	s.connPool.DeleteConn(identifier)
-	return s.registry.Unsubscribe(identifier)
+	s.connPool.mu.Lock()
+	session := s.connPool.conns[s.connPool.addr(identifier)]
+	if session != nil {
+		s.connPool.removeLocked(session)
+	}
+	i := s.registry.Unsubscribe(identifier)
+	s.connPool.mu.Unlock()
+	if session != nil {
+		session.conn.Close()
+	}
+	return i
 }
 
 // Ping measures the RTT response time.
@@ -846,4 +813,5 @@ func (s *Server) Stop() {
 	if s.listener != nil {
 		s.listener.Close()
 	}
+	s.connPool.Close()
 }
