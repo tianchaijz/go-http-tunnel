@@ -13,8 +13,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,10 +21,6 @@ import (
 	"github.com/mmatczuk/go-http-tunnel/id"
 	"github.com/mmatczuk/go-http-tunnel/log"
 	"github.com/mmatczuk/go-http-tunnel/proto"
-)
-
-var (
-	zeroPortRe *regexp.Regexp = regexp.MustCompile("^0+$")
 )
 
 // ServerConfig defines configuration for the Server.
@@ -419,118 +413,6 @@ func (s *Server) notifyError(serverError error, session *connPair) {
 			"err", err,
 		)
 	}
-}
-
-// addTunnels invokes addHost or addListener based on data from proto.Tunnel. If
-// a tunnel cannot be added whole batch is reverted.
-func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, session *connPair) error {
-	for name, t := range tunnels {
-		if t == nil {
-			return fmt.Errorf("missing configuration for tunnel %s", name)
-		}
-	}
-
-	identifier := session.identifier
-	i := &RegistryItem{
-		Tag:       session.tag,
-		Hosts:     []*HostAuth{},
-		Listeners: []Listener{},
-		Ports:     []uint64{},
-	}
-
-	var (
-		l          net.Listener
-		lc         net.ListenConfig
-		err        error
-		tunnelName string
-	)
-
-	for name, t := range tunnels {
-		if err = session.ctx.Err(); err != nil {
-			goto rollback
-		}
-		switch t.Protocol {
-		case proto.HTTP:
-			i.Hosts = append(i.Hosts, &HostAuth{t.Host, NewAuth(t.Auth)})
-			i.dashboard = append(i.dashboard, dashboardTunnel{Name: name, Protocol: t.Protocol, Address: t.Host})
-		case proto.TCP, proto.TCP4, proto.TCP6, proto.UNIX:
-			host, portText, splitErr := net.SplitHostPort(t.RemoteAddr)
-			if t.Protocol != proto.UNIX && splitErr == nil && zeroPortRe.MatchString(portText) {
-				for {
-					if err = session.ctx.Err(); err != nil {
-						goto rollback
-					}
-					port := s.registry.portPool.Get()
-					if port == 0 || port > 65535 {
-						err = fmt.Errorf("dynamic port range exhausted: %d", port)
-						goto rollback
-					}
-					addr := net.JoinHostPort(host, strconv.FormatUint(port, 10))
-
-					l, err = lc.Listen(session.ctx, t.Protocol, addr)
-					if err != nil {
-						s.logger.Log(
-							"level", 0,
-							"msg", "listen failed",
-							"addr", addr,
-							"err", err,
-						)
-						if !errors.Is(err, errAddrInUse) {
-							goto rollback
-						}
-						continue
-					}
-
-					t.RemoteAddr = addr
-					i.Ports = append(i.Ports, port)
-					break
-				}
-			} else {
-				l, err = lc.Listen(session.ctx, t.Protocol, t.RemoteAddr)
-				if err != nil {
-					goto rollback
-				}
-			}
-
-			s.logger.Log(
-				"level", 1,
-				"action", "open listener",
-				"identifier", identifier,
-				"addr", l.Addr(),
-			)
-
-			tunnelName = name
-			i.Listeners = append(i.Listeners, Listener{l, tunnelName})
-			i.dashboard = append(i.dashboard, dashboardTunnel{Name: name, Protocol: t.Protocol, Address: l.Addr().String()})
-		default:
-			err = fmt.Errorf("unsupported protocol for tunnel %s: %s", name, t.Protocol)
-			goto rollback
-		}
-	}
-
-	s.connPool.mu.Lock()
-	if s.connPool.conns[s.connPool.addr(identifier)] != session {
-		err = errClientNotConnected
-	} else if session.ctx.Err() != nil {
-		err = session.ctx.Err()
-	} else {
-		err = s.set(i, identifier)
-	}
-	s.connPool.mu.Unlock()
-	if err != nil {
-		goto rollback
-	}
-
-	for _, l := range i.Listeners {
-		go s.listen(l, identifier)
-	}
-
-	return nil
-
-rollback:
-	s.doDisconnect(identifier, i)
-
-	return err
 }
 
 // Unsubscribe removes client from registry, disconnects client if already

@@ -57,6 +57,7 @@ type RegistryItem struct {
 	Listeners []Listener
 	Ports     []uint64
 	dashboard []dashboardTunnel
+	hostKeys  []hostKey
 }
 
 // HostAuth holds host and authentication info.
@@ -72,7 +73,7 @@ type hostInfo struct {
 
 type registry struct {
 	items    map[id.ID]*RegistryItem
-	hosts    map[string]*hostInfo
+	hosts    map[hostKey]*hostInfo
 	mu       sync.RWMutex
 	logger   log.Logger
 	portPool *PortPool
@@ -85,7 +86,7 @@ func newRegistry(logger log.Logger, startPort uint64) *registry {
 
 	return &registry{
 		items:    make(map[id.ID]*RegistryItem),
-		hosts:    make(map[string]*hostInfo),
+		hosts:    make(map[hostKey]*hostInfo),
 		logger:   logger,
 		portPool: NewPortPool(startPort, 1024*128),
 	}
@@ -124,7 +125,7 @@ func (r *registry) Subscriber(hostPort string) (id.ID, *Auth, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	h, ok := r.hosts[trimPort(hostPort)]
+	h, ok := r.hosts[canonicalHost(hostPort)]
 	if !ok {
 		return id.ID{}, nil, false
 	}
@@ -150,7 +151,7 @@ func (r *registry) Unsubscribe(identifier id.ID) *RegistryItem {
 
 	if i.Hosts != nil {
 		for _, h := range i.Hosts {
-			delete(r.hosts, h.Host)
+			delete(r.hosts, canonicalHost(h.Host))
 		}
 	}
 
@@ -182,13 +183,13 @@ func (r *registry) set(i *RegistryItem, identifier id.ID) error {
 			if h.Auth != nil && h.Auth.User == "" {
 				return fmt.Errorf("missing auth user")
 			}
-			if _, ok := r.hosts[trimPort(h.Host)]; ok {
+			if _, ok := r.hosts[canonicalHost(h.Host)]; ok {
 				return fmt.Errorf("host %q is occupied", h.Host)
 			}
 		}
 
 		for _, h := range i.Hosts {
-			r.hosts[trimPort(h.Host)] = &hostInfo{
+			r.hosts[canonicalHost(h.Host)] = &hostInfo{
 				identifier: identifier,
 				auth:       h.Auth,
 			}
@@ -217,7 +218,7 @@ func (r *registry) clear(identifier id.ID, tag string) *RegistryItem {
 
 	if i.Hosts != nil {
 		for _, h := range i.Hosts {
-			delete(r.hosts, trimPort(h.Host))
+			delete(r.hosts, canonicalHost(h.Host))
 		}
 	}
 

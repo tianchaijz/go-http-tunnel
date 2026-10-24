@@ -185,7 +185,7 @@ func TestServerRemovedHandshakeCannotPublishTunnels(t *testing.T) {
 			close(gate.release)
 		}
 	})
-	s := &Server{registry: newRegistry(log.NewNopLogger(), 0), logger: gate}
+	s := &Server{registry: newRegistry(log.NewNopLogger(), 30000), logger: gate}
 	s.connPool = newConnPool(new(http2.Transport), s.disconnectedWithTag)
 	defer s.connPool.Close()
 	identifier := id.New([]byte("same"))
@@ -197,7 +197,7 @@ func TestServerRemovedHandshakeCannotPublishTunnels(t *testing.T) {
 	registered := make(chan error, 1)
 	go func() {
 		registered <- s.addTunnels(map[string]*proto.Tunnel{
-			"old": {Protocol: proto.TCP, RemoteAddr: "127.0.0.1:"},
+			"old": {Protocol: proto.TCP, RemoteAddr: "127.0.0.1:0"},
 		}, old)
 	}()
 	awaitPoolSignal(t, gate.entered, "old handshake did not prepare listener")
@@ -227,12 +227,12 @@ func TestServerRemovedHandshakeCannotPublishTunnels(t *testing.T) {
 }
 
 func TestServerReconnectReusesListenerPort(t *testing.T) {
-	s := &Server{registry: newRegistry(nil, 0), logger: log.NewNopLogger()}
+	s := &Server{registry: newRegistry(nil, 30000), logger: log.NewNopLogger()}
 	s.connPool = newConnPool(new(http2.Transport), s.disconnectedWithTag)
 	defer s.connPool.Close()
 	identifier := id.New([]byte("same"))
 	s.Subscribe(identifier)
-	addr := "127.0.0.1:"
+	addr := "127.0.0.1:0"
 	for _, tag := range []string{"old", "replacement"} {
 		session, err := s.connPool.AddConn(poolTestConn(t, nil, nil), identifier, tag)
 		if err != nil {

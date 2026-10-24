@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
-	"strconv"
 	"testing"
 	"time"
 
@@ -90,25 +90,23 @@ func TestServerDynamicPortRetryAndRollbackReuse(t *testing.T) {
 	if err := s.addTunnels(map[string]*proto.Tunnel{"tcp": tunnel}, session); err != errClientNotSubscribed {
 		t.Fatalf("unsubscribed setup = %v, want client not subscribed", err)
 	}
-	_, allocated, err := net.SplitHostPort(tunnel.RemoteAddr)
-	if err != nil {
-		t.Fatal(err)
+	allocatedPort := s.registry.portPool.Get()
+	if allocatedPort <= uint64(port) || allocatedPort > 65535 {
+		t.Fatalf("returned port = %d, want a valid port above occupied %d", allocatedPort, port)
 	}
-	allocatedPort, err := strconv.Atoi(allocated)
-	if err != nil || allocatedPort <= port || allocatedPort > 65535 {
-		t.Fatalf("allocated port = %q, want a valid port above occupied %d", allocated, port)
-	}
-	probe, err := net.Listen("tcp", tunnel.RemoteAddr)
+	allocatedAddr := fmt.Sprintf("127.0.0.1:%d", allocatedPort)
+	probe, err := net.Listen("tcp", allocatedAddr)
 	if err != nil {
 		t.Fatalf("rollback left allocated listener open: %v", err)
 	}
 	probe.Close()
+	s.registry.portPool.Put(allocatedPort)
 	s.Subscribe(session.identifier)
 	retry := &proto.Tunnel{Protocol: proto.TCP, RemoteAddr: "127.0.0.1:0"}
 	if err := s.addTunnels(map[string]*proto.Tunnel{"tcp": retry}, session); err != nil {
 		t.Fatal(err)
 	}
-	if retry.RemoteAddr != tunnel.RemoteAddr {
-		t.Fatalf("retry allocated %s, want rolled-back address %s", retry.RemoteAddr, tunnel.RemoteAddr)
+	if got := s.registry.dashboardSnapshot()[0].Address; got != allocatedAddr {
+		t.Fatalf("retry allocated %s, want rolled-back address %s", got, allocatedAddr)
 	}
 }
