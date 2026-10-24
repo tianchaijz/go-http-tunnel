@@ -150,18 +150,19 @@ func (c *Client) Start() error {
 		}()
 	}
 
-	doServe := func() error {
+	doServe := func() (time.Duration, error) {
 		conn, err := c.dial(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to connect to server: %s", err)
+			return 0, fmt.Errorf("failed to connect to server: %s", err)
 		}
 
-		session := &clientSession{conn: conn, lastHeartbeat: time.Now()}
+		started := time.Now()
+		session := &clientSession{conn: conn, lastHeartbeat: started}
 		c.mu.Lock()
 		if c.run != run || ctx.Err() != nil {
 			c.mu.Unlock()
 			conn.Close()
-			return ctx.Err()
+			return 0, ctx.Err()
 		}
 		run.session = session
 		c.mu.Unlock()
@@ -171,6 +172,7 @@ func (c *Client) Start() error {
 				c.serveHTTP(session, w, r)
 			}),
 		})
+		servedFor := time.Since(started)
 		conn.Close()
 		c.logger.Log("level", 1, "action", "disconnected")
 
@@ -183,7 +185,7 @@ func (c *Client) Start() error {
 		if err == nil {
 			err = errors.New("connection is being cut")
 		}
-		return err
+		return servedFor, err
 	}
 
 	b := c.config.ServeBackoff
@@ -191,13 +193,16 @@ func (c *Client) Start() error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		t := time.Now()
-		err := doServe()
+		servedFor, err := doServe()
 		if ctx.Err() != nil {
 			return nil
 		}
 		if b == nil {
 			return err
+		}
+		if servedFor > 60*time.Second {
+			b.Reset()
+			continue
 		}
 		d := b.NextBackOff()
 		if ctx.Err() != nil {
@@ -205,10 +210,6 @@ func (c *Client) Start() error {
 		}
 		if d < 0 {
 			return err
-		}
-		if time.Since(t) > 60*time.Second {
-			b.Reset()
-			continue
 		}
 		c.logger.Log("level", 1, "action", "serve backoff", "sleep", d, "err", err)
 		if waitBackoff(ctx, d) != nil {
