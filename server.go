@@ -704,13 +704,24 @@ func (s *Server) proxyConn(identifier id.ID, conn net.Conn, msg *proto.ControlMe
 	req = req.WithContext(ctx)
 
 	done := make(chan struct{})
+	defer func() {
+		cancel()
+		pr.Close()
+		pw.Close()
+		conn.Close()
+		<-done
+	}()
 	go func() {
-		transfer(pw, conn, log.NewContext(s.logger).With(
+		err := transfer(pw, conn, log.NewContext(s.logger).With(
 			"dir", "user to client",
 			"dst", identifier,
 			"src", conn.RemoteAddr(),
 		))
-		cancel()
+		pw.CloseWithError(err)
+		if err != nil {
+			cancel()
+			conn.Close()
+		}
 		close(done)
 	}()
 
@@ -725,8 +736,6 @@ func (s *Server) proxyConn(identifier id.ID, conn net.Conn, msg *proto.ControlMe
 		"dst", conn.RemoteAddr(),
 		"src", identifier,
 	))
-
-	<-done
 
 	s.logger.Log(
 		"level", 2,

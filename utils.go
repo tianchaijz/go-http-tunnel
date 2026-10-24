@@ -13,7 +13,7 @@ import (
 	"github.com/mmatczuk/go-http-tunnel/log"
 )
 
-func transfer(dst io.Writer, src io.Reader, logger log.Logger) {
+func transfer(dst io.Writer, src io.Reader, logger log.Logger) error {
 	n, err := io.Copy(dst, src)
 	if err != nil {
 		logger.Log(
@@ -28,6 +28,7 @@ func transfer(dst io.Writer, src io.Reader, logger log.Logger) {
 		"action", "transferred",
 		"bytes", n,
 	)
+	return err
 }
 
 func setXForwardedFor(h http.Header, remoteAddr string) {

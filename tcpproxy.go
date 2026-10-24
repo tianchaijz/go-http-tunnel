@@ -5,6 +5,7 @@
 package tunnel
 
 import (
+	"context"
 	"io"
 	"net"
 
@@ -55,6 +56,7 @@ func NewMultiTCPProxy(localAddrMap map[string]string, logger log.Logger) *TCPPro
 
 // Proxy is a ProxyFunc.
 func (p *TCPProxy) Proxy(w io.Writer, r io.ReadCloser, msg *proto.ControlMessage) {
+	defer r.Close()
 	switch msg.ForwardedProto {
 	case proto.TCP, proto.TCP4, proto.TCP6, proto.UNIX:
 		// ok
@@ -77,7 +79,12 @@ func (p *TCPProxy) Proxy(w io.Writer, r io.ReadCloser, msg *proto.ControlMessage
 		return
 	}
 
-	local, err := net.DialTimeout("tcp", target, DefaultTimeout)
+	ctx := context.Background()
+	if reader, ok := r.(interface{ Context() context.Context }); ok {
+		ctx = reader.Context()
+	}
+	dialer := net.Dialer{Timeout: DefaultTimeout}
+	local, err := dialer.DialContext(ctx, "tcp", target)
 	if err != nil {
 		p.logger.Log(
 			"level", 0,
@@ -100,17 +107,45 @@ func (p *TCPProxy) Proxy(w io.Writer, r io.ReadCloser, msg *proto.ControlMessage
 		)
 	}
 
+	type copyResult struct {
+		upload bool
+		err    error
+	}
+	results := make(chan copyResult, 2)
 	go func() {
-		transfer(flushWriter{w}, local, log.NewContext(p.logger).With(
+		err := transfer(flushWriter{w}, local, log.NewContext(p.logger).With(
 			"dst", msg.ForwardedHost,
 			"src", target,
 		))
+		results <- copyResult{err: err}
+	}()
+	go func() {
+		err := transfer(local, r, log.NewContext(p.logger).With(
+			"dst", target,
+			"src", msg.ForwardedHost,
+		))
+		results <- copyResult{upload: true, err: err}
 	}()
 
-	transfer(local, r, log.NewContext(p.logger).With(
-		"dst", target,
-		"src", msg.ForwardedHost,
-	))
+	remaining := 2
+	for remaining > 0 {
+		select {
+		case result := <-results:
+			remaining--
+			if result.upload && result.err == nil {
+				if err := local.(*net.TCPConn).CloseWrite(); err == nil {
+					continue
+				}
+			}
+		case <-ctx.Done():
+		}
+		local.Close()
+		r.Close()
+		for remaining > 0 {
+			<-results
+			remaining--
+		}
+	}
 }
 
 // Remote address or tunnel name
