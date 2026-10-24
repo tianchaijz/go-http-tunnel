@@ -18,11 +18,39 @@ Common use cases:
 
 ## Installation
 
-Build the latest version.
+Build from a checkout with Go 1.20 or newer and Make:
 
 ```bash
-$ go get -u github.com/mmatczuk/go-http-tunnel/cmd/...
+$ make build
+$ ./build/tunnel -version
+$ ./build/tunneld -version
 ```
+
+`make build` creates native binaries in `build/`. Use `make GO=/path/to/go`
+to select a Go toolchain. `GOFMT` defaults to that toolchain's formatter and can
+also be overridden.
+
+`make` checks formatting without changing files, runs `go vet`, verifies module
+checksums, runs tests with race detection and coverage, and builds both binaries.
+Race tests require a C compiler and a platform supported by Go's race detector.
+Use `make fmt` to apply formatting and `make get-deps` to download dependencies
+from `go.mod`. `make get-tools` checks that Go is available for existing CI jobs.
+The build no longer requires `dep`, `gox`, or external linters.
+
+Cross-compilation is available through `make build-cross`. For example:
+
+```bash
+$ make build-cross PLATFORMS="linux/amd64 windows/amd64"
+$ make package
+```
+
+Cross-built binaries go in `build/pkg/OS_ARCH/`, with `.exe` suffixes on Windows.
+`make package` writes archives and `SHA256SUMS` in `build/dist/` and requires
+`tar` and `sha256sum`. Run `make clean` before changing the platform list to
+remove old build outputs. It leaves Go's dependency and build caches intact.
+`make release` checks, tests, cleans, cross-compiles, and packages in that order,
+even with parallel Make. Publishing remains a separate `make publish` step and
+requires `ghr` and `GITHUB_TOKEN`.
 
 Alternatively [download the latest release](https://github.com/mmatczuk/go-http-tunnel/releases/latest).
 

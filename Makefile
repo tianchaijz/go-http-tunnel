@@ -1,93 +1,68 @@
-all: clean check test
-
-.PHONY: clean
-clean:
-	@go clean -r
-
-.PHONY: fmt
-fmt:
-	@go fmt ./...
-
-.PHONY: check
-check: .check-fmt .check-vet .check-lint .check-ineffassign .check-mega .check-misspell .check-vendor
-
-.PHONY: .check-fmt
-# pacman -S moreutils
-.check-fmt:
-	@go fmt ./... | tee /dev/stderr | ifne false
-
-.PHONY: .check-vet
-.check-vet:
-	@go vet ./...
-
-.PHONY: .check-lint
-.check-lint:
-	@golint `go list ./...` \
-	| grep -v /id/ \
-	| grep -v /tunnelmock/ \
-	| tee /dev/stderr | ifne false
-
-.PHONY: .check-ineffassign
-.check-ineffassign:
-	@ineffassign ./
-
-.PHONY: .check-misspell
-.check-misspell:
-	@misspell ./...
-
-.PHONY: .check-mega
-.check-mega:
-	@megacheck ./...
-
-.PHONY: .check-vendor
-.check-vendor:
-	@dep ensure -no-vendor -dry-run
-
-.PHONY: test
-test:
-	@echo "==> Running tests (race)..."
-	@go test -cover -race ./...
-
-.PHONY: get-deps
-get-deps:
-	@echo "==> Installing dependencies..."
-	@dep ensure
-
-.PHONY: get-tools
-get-tools:
-	@echo "==> Installing tools..."
-	@go get -u github.com/golang/dep/cmd/dep
-	@go get -u github.com/golang/lint/golint
-	@go get -u github.com/golang/mock/gomock
-
-	@go get -u github.com/client9/misspell/cmd/misspell
-	@go get -u github.com/gordonklaus/ineffassign
-	@go get -u github.com/mitchellh/gox
-	@go get -u github.com/tcnksm/ghr
-	@go get -u honnef.co/go/tools/cmd/megacheck
-
+GO ?= go
+GOFMT ?= $(shell $(GO) env GOROOT)/bin/gofmt
 OUTPUT_DIR = build
-OS = "darwin freebsd linux windows"
-ARCH = "386 amd64 arm"
-OSARCH = "!darwin/386 !darwin/arm !windows/arm"
+PLATFORMS ?= darwin/amd64 darwin/arm64 freebsd/386 freebsd/amd64 freebsd/arm linux/386 linux/amd64 linux/arm linux/arm64 windows/386 windows/amd64
 GIT_COMMIT = $(shell git describe --always)
 
-.PHONY: release
-release: check test clean build package
+.PHONY: all clean fmt check .check-fmt .check-vet .check-mod test get-deps get-tools build build-cross release package publish
+all: check test build
 
-.PHONY: build
+clean:
+	@test -n "$(OUTPUT_DIR)" && test "$(abspath $(OUTPUT_DIR))" != /
+	rm -rf -- "$(OUTPUT_DIR)/pkg" "$(OUTPUT_DIR)/dist"
+	rm -f -- "$(OUTPUT_DIR)/tunnel" "$(OUTPUT_DIR)/tunneld" "$(OUTPUT_DIR)/tunnel.exe" "$(OUTPUT_DIR)/tunneld.exe"
+
+fmt:
+	$(GO) fmt ./...
+
+check: .check-fmt .check-vet .check-mod
+
+.check-fmt:
+	@set -e; files=$$("$(GOFMT)" -l $$(git ls-files '*.go')); \
+	if [ -n "$$files" ]; then printf 'Run make fmt to format:\n%s\n' "$$files"; exit 1; fi
+
+.check-vet:
+	$(GO) vet ./...
+
+.check-mod:
+	$(GO) mod verify
+
+test:
+	$(GO) test -cover -race ./...
+
+get-deps:
+	$(GO) mod download
+
+get-tools:
+	$(GO) version
+
 build:
-	mkdir -p ${OUTPUT_DIR}
-	CGO_ENABLED=0 GOARM=5 gox -ldflags "-w -X main.version=$(GIT_COMMIT)" \
-	-os=${OS} -arch=${ARCH} -osarch=${OSARCH} -output "${OUTPUT_DIR}/pkg/{{.OS}}_{{.Arch}}/{{.Dir}}" \
-	./cmd/tunnel ./cmd/tunneld
+	mkdir -p "$(OUTPUT_DIR)"
+	CGO_ENABLED=0 $(GO) build -ldflags "-w -X main.version=$(GIT_COMMIT)" -o "$(OUTPUT_DIR)/" ./cmd/tunnel ./cmd/tunneld
 
-.PHONY: package
+build-cross:
+	@set -e; for platform in $(PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; \
+		mkdir -p "$(OUTPUT_DIR)/pkg/$${os}_$$arch"; \
+		CGO_ENABLED=0 GOARM=5 GOOS=$$os GOARCH=$$arch $(GO) build \
+			-ldflags "-w -X main.version=$(GIT_COMMIT)" \
+			-o "$(OUTPUT_DIR)/pkg/$${os}_$$arch/" ./cmd/tunnel ./cmd/tunneld; \
+	done
+
+release:
+	$(MAKE) check
+	$(MAKE) test
+	$(MAKE) clean
+	$(MAKE) build-cross
+	$(MAKE) package
+
 package:
-	mkdir ${OUTPUT_DIR}/dist
-	cd ${OUTPUT_DIR}/pkg/; for osarch in *; do (cd $$osarch; tar zcvf ../../dist/tunnel_$$osarch.tar.gz ./*); done;
-	cd ${OUTPUT_DIR}/dist; sha256sum * > ./SHA256SUMS
+	mkdir -p "$(OUTPUT_DIR)/dist"
+	@set -e; cd "$(OUTPUT_DIR)/pkg"; \
+	for osarch in *; do \
+		tar -czf "../dist/tunnel_$$osarch.tar.gz" -C "$$osarch" .; \
+	done
+	cd "$(OUTPUT_DIR)/dist" && sha256sum tunnel_*.tar.gz > SHA256SUMS
 
-.PHONY: publish
 publish:
 	ghr -recreate -u mmatczuk -t ${GITHUB_TOKEN} -r go-http-tunnel pre-release ${OUTPUT_DIR}/dist
