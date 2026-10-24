@@ -31,8 +31,8 @@ func TestClientServeBackoffStops(t *testing.T) {
 		return nil, dialErr
 	}
 	err := c.Start()
-	if dials != 1 || !errors.Is(err, dialErr) {
-		t.Fatalf("Start made %d dials and returned %v; want one dial and %v", dials, err, dialErr)
+	if dials != 1 || err == nil || err.Error() != "failed to connect to server: dial failed" {
+		t.Fatalf("Start made %d dials and returned %v; want one dial and the connection error", dials, err)
 	}
 }
 

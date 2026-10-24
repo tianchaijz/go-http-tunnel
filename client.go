@@ -203,7 +203,10 @@ func (c *Client) Start() error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		if d < 0 || time.Since(t) > 60*time.Second {
+		if d < 0 {
+			return err
+		}
+		if time.Since(t) > 60*time.Second {
 			b.Reset()
 			continue
 		}
@@ -389,7 +392,7 @@ func (c *Client) serveHTTP(session *clientSession, w http.ResponseWriter, r *htt
 }
 
 func (c *Client) handleHandshakeError(session *clientSession, w http.ResponseWriter, r *http.Request) {
-	err := fmt.Errorf(r.Header.Get(proto.HeaderError))
+	err := errors.New(r.Header.Get(proto.HeaderError))
 
 	c.logger.Log(
 		"level", 1,
