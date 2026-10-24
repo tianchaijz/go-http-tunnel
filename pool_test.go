@@ -221,3 +221,80 @@ func TestConnPoolStaleProbePreservesReplacement(t *testing.T) {
 		t.Errorf("cleanup callbacks = %d, want only the deleted connection's callback", frees)
 	}
 }
+
+func TestConnPoolConcurrentAddConnKeepsWinner(t *testing.T) {
+	p := newConnPool(new(http2.Transport), nil)
+	identifier := id.New([]byte("same"))
+	var gate *poolWriteGate
+	candidate := poolTestConn(t, func(conn net.Conn) net.Conn {
+		gate = gatePoolWrites(t, conn, func(b []byte) bool { return bytes.HasPrefix(b, []byte(http2.ClientPreface)) })
+		return gate
+	}, nil)
+	pending := make(chan error, 1)
+	go func() { pending <- p.AddConn(candidate, identifier) }()
+	awaitPoolSignal(t, gate.entered, "client did not write HTTP/2 preface")
+	winner := poolTestConn(t, nil, nil)
+	installed := make(chan error, 1)
+	go func() { installed <- p.AddConn(winner, identifier) }()
+	select {
+	case err := <-installed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(gate.release)
+		<-pending
+		<-installed
+		t.Fatal("concurrent AddConn blocked behind pending preface")
+	}
+	close(gate.release)
+	if err := <-pending; err != errClientAlreadyConnected {
+		t.Fatalf("pending AddConn = %v, want already connected", err)
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.conns[p.addr(identifier)].conn != winner {
+		t.Error("pending AddConn overwrote the installed connection")
+	}
+}
+
+type poolDeathNotice struct {
+	*connPool
+	dead chan struct{}
+}
+
+func (p *poolDeathNotice) MarkDead(cc *http2.ClientConn) {
+	close(p.dead)
+	p.connPool.MarkDead(cc)
+}
+
+func TestConnPoolAddConnRejectsClosedConnection(t *testing.T) {
+	transport := new(http2.Transport)
+	p := newConnPool(transport, nil)
+	dead := make(chan struct{})
+	transport.ConnPool = &poolDeathNotice{connPool: p, dead: dead}
+	client, peer := net.Pipe()
+	t.Cleanup(func() { client.Close(); peer.Close() })
+	gate := gatePoolWrites(t, client, func(b []byte) bool { return bytes.HasPrefix(b, []byte(http2.ClientPreface)) })
+	go func() {
+		peer.Read(make([]byte, 4096))
+		peer.Close()
+	}()
+	added := make(chan error, 1)
+	go func() { added <- p.AddConn(gate, id.New([]byte("closed"))) }()
+	awaitPoolSignal(t, gate.entered, "client did not write HTTP/2 preface")
+	if !p.mu.TryLock() {
+		t.Fatal("pool lock held during HTTP/2 preface")
+	}
+	close(gate.release)
+	select {
+	case <-dead:
+		p.mu.Unlock()
+	case <-time.After(time.Second):
+		p.mu.Unlock()
+		t.Fatal("HTTP/2 read loop did not report closed connection")
+	}
+	if err := <-added; err != errClientNotConnected {
+		t.Fatalf("AddConn after peer closed = %v, want client not connected", err)
+	}
+}
