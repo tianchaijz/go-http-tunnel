@@ -237,3 +237,51 @@ func TestTCPProxyJoinsResponseWriter(t *testing.T) {
 		t.Fatal("Proxy returned before response write finished")
 	}
 }
+
+func TestServerTCPResponseStatus(t *testing.T) {
+	for _, status := range []int{http.StatusOK, 299, http.StatusMultipleChoices, http.StatusBadRequest, http.StatusBadGateway} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			local, remote := net.Pipe()
+			defer local.Close()
+			defer remote.Close()
+			if err := remote.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			conn := &halfCloseConn{Conn: local, readDone: make(chan struct{})}
+			response := &halfCloseReader{ReadCloser: io.NopCloser(bytes.NewBufferString("proxy response body"))}
+			s := &Server{connPool: newConnPool(nil, nil), logger: log.NewNopLogger(), httpClient: &http.Client{Transport: halfCloseTransport(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: status, Body: response, Header: make(http.Header)}, nil
+			})}}
+			done := make(chan error, 1)
+			go func() { done <- s.proxyConn(id.ID{}, conn, &proto.ControlMessage{ForwardedProto: proto.TCP}) }()
+			data, err := io.ReadAll(remote)
+			if err != nil {
+				t.Fatalf("read public connection: %v", err)
+			}
+			success := status >= 200 && status < 300
+			want := ""
+			if success {
+				want = "proxy response body"
+			}
+			if string(data) != want {
+				t.Errorf("public TCP bytes = %q, want %q", data, want)
+			}
+			select {
+			case err := <-done:
+				if (err == nil) != success {
+					t.Errorf("proxyConn error = %v for HTTP status %d", err, status)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("proxyConn did not finish")
+			}
+			select {
+			case <-conn.readDone:
+			default:
+				t.Error("proxyConn returned before upload finished")
+			}
+			if !response.closed {
+				t.Error("response body left open")
+			}
+		})
+	}
+}
