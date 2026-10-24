@@ -47,6 +47,22 @@ func TestClient_ConcurrentHeartbeats(t *testing.T) {
 	wg.Wait()
 }
 
+func TestClient_UnknownAction(t *testing.T) {
+	c := lifecycleClient(t)
+	r := httptest.NewRequest(http.MethodPut, "/", nil)
+	msg := &proto.ControlMessage{
+		Action:         "unsupported",
+		ForwardedHost:  "backend",
+		ForwardedProto: proto.TCP,
+	}
+	msg.WriteToHeader(r.Header)
+	w := httptest.NewRecorder()
+	c.serveHTTP(&clientSession{}, w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("unknown action status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
 func TestClient_Dial(t *testing.T) {
 	t.Parallel()
 
