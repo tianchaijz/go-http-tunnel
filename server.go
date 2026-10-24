@@ -576,6 +576,9 @@ func (s *Server) proxyConn(identifier id.ID, conn net.Conn, msg *proto.ControlMe
 		return fmt.Errorf("io error: %s", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("proxy setup failed: HTTP status %d", resp.StatusCode)
+	}
 
 	transfer(conn, resp.Body, log.NewContext(s.logger).With(
 		"dir", "client to user",
