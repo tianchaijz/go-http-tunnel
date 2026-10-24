@@ -5,6 +5,7 @@
 package tunnel
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"net"
@@ -23,6 +24,7 @@ func TestClient_ConcurrentHeartbeats(t *testing.T) {
 	t.Parallel()
 
 	c := &Client{}
+	session := &clientSession{}
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
@@ -34,7 +36,7 @@ func TestClient_ConcurrentHeartbeats(t *testing.T) {
 			w := httptest.NewRecorder()
 
 			<-start
-			c.serveHTTP(w, r)
+			c.serveHTTP(session, w, r)
 
 			if w.Code != http.StatusOK {
 				t.Errorf("Heartbeat status = %d, want %d", w.Code, http.StatusOK)
@@ -63,7 +65,7 @@ func TestClient_Dial(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conn, err := c.dial()
+	conn, err := c.dial(context.Background())
 	if err != nil {
 		t.Fatal("Dial error", err)
 	}
@@ -102,7 +104,7 @@ func TestClient_DialBackoff(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, err = c.dial()
+	_, err = c.dial(context.Background())
 
 	if time.Since(start) < 100*time.Millisecond {
 		t.Fatal("Wait mismatch", err)
@@ -110,5 +112,23 @@ func TestClient_DialBackoff(t *testing.T) {
 
 	if err.Error() != "backoff limit exeded: foobar" {
 		t.Fatal("Error mismatch", err)
+	}
+}
+
+func TestClient_SessionHandlersDoNotMutateReplacement(t *testing.T) {
+	c := lifecycleClient(t)
+	old := &clientSession{}
+	replacement := &clientSession{lastHeartbeat: time.Unix(123, 0)}
+	c.run = &clientRun{session: replacement}
+	for _, header := range []string{proto.HeaderHeartbeat, proto.HeaderError} {
+		r := httptest.NewRequest(http.MethodConnect, "/", nil)
+		r.Header.Set(header, "late message")
+		c.serveHTTP(old, httptest.NewRecorder(), r)
+	}
+	if old.lastHeartbeat.IsZero() || old.serverErr == nil {
+		t.Fatal("late messages were not handled on their original session")
+	}
+	if replacement.lastHeartbeat != time.Unix(123, 0) || replacement.serverErr != nil {
+		t.Fatal("late messages changed the replacement session")
 	}
 }

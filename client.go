@@ -5,6 +5,7 @@
 package tunnel
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -29,7 +30,9 @@ type ClientConfig struct {
 	// tls.Client.
 	TLSClientConfig *tls.Config
 	// DialTLS specifies an optional dial function that creates a tls
-	// connection to the server. If DialTLS is nil, tls.Dial is used.
+	// connection to the server. If nil, dialing and TLS negotiation use
+	// the current Start context. A custom callback runs synchronously and
+	// must manage its own cancellation and timeouts.
 	DialTLS func(network, addr string, config *tls.Config) (net.Conn, error)
 	// Backoff specifies backoff policy on server connection retry. If nil
 	// when dial fails it will not be retried.
@@ -52,13 +55,22 @@ type ClientConfig struct {
 type Client struct {
 	config *ClientConfig
 
-	conn           net.Conn
-	connMu         sync.Mutex
-	httpServer     *http2.Server
-	serverErr      error
-	lastHeartbeat  time.Time
-	lastDisconnect time.Time
-	logger         log.Logger
+	mu         sync.Mutex
+	run        *clientRun
+	httpServer *http2.Server
+	logger     log.Logger
+}
+
+type clientRun struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	session *clientSession // guarded by Client.mu
+}
+
+type clientSession struct {
+	conn          net.Conn
+	lastHeartbeat time.Time // guarded by Client.mu
+	serverErr     error     // guarded by Client.mu
 }
 
 // NewClient creates a new unconnected Client based on configuration. Caller
@@ -94,117 +106,146 @@ func NewClient(config *ClientConfig) (*Client, error) {
 // Start connects client to the server, it returns error if there is a
 // connection error, or server cannot open requested tunnels. On connection
 // error a backoff policy is used to reestablish the connection. When connected
-// HTTP/2 server is started to handle ControlMessages.
+// HTTP/2 server is started to handle ControlMessages. Stop makes Start return
+// nil. Concurrent calls to Start return an error. After Start returns, the
+// client can be started again.
 func (c *Client) Start() error {
-	c.logger.Log(
-		"level", 1,
-		"action", "start",
-	)
+	c.mu.Lock()
+	if c.run != nil {
+		c.mu.Unlock()
+		return errors.New("client already started")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	run := &clientRun{ctx: ctx, cancel: cancel}
+	c.run = run
+	c.mu.Unlock()
 
+	var checker sync.WaitGroup
+	defer func() {
+		cancel()
+		checker.Wait()
+		c.mu.Lock()
+		session := run.session
+		if c.run == run {
+			c.run = nil
+		}
+		c.mu.Unlock()
+		if session != nil {
+			session.conn.Close()
+		}
+	}()
+
+	c.logger.Log("level", 1, "action", "start")
+	if c.config.DialBackoff != nil {
+		c.config.DialBackoff.Reset()
+	}
+	if c.config.ServeBackoff != nil {
+		c.config.ServeBackoff.Reset()
+	}
 	if c.config.ServerHeartbeatInterval > 0 {
-		go c.checkHeartbeat()
+		checker.Add(1)
+		go func() {
+			defer checker.Done()
+			c.checkHeartbeat(run)
+		}()
 	}
 
 	doServe := func() error {
-		conn, err := c.connect()
+		conn, err := c.dial(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to connect to server: %s", err)
 		}
+
+		session := &clientSession{conn: conn, lastHeartbeat: time.Now()}
+		c.mu.Lock()
+		if c.run != run || ctx.Err() != nil {
+			c.mu.Unlock()
+			conn.Close()
+			return ctx.Err()
+		}
+		run.session = session
+		c.mu.Unlock()
 
 		c.httpServer.ServeConn(conn, &http2.ServeConnOpts{
-			Handler: http.HandlerFunc(c.serveHTTP),
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				c.serveHTTP(session, w, r)
+			}),
 		})
+		conn.Close()
+		c.logger.Log("level", 1, "action", "disconnected")
 
-		c.logger.Log(
-			"level", 1,
-			"action", "disconnected",
-		)
-
-		c.connMu.Lock()
-		now := time.Now()
-		err = c.serverErr
-
-		// detect disconnect hiccup
-		if err == nil {
-			err = fmt.Errorf("connection is being cut")
+		c.mu.Lock()
+		err = session.serverErr
+		if run.session == session {
+			run.session = nil
 		}
-
-		c.conn = nil
-		c.serverErr = nil
-		c.lastDisconnect = now
-		c.connMu.Unlock()
-
+		c.mu.Unlock()
+		if err == nil {
+			err = errors.New("connection is being cut")
+		}
 		return err
 	}
 
 	b := c.config.ServeBackoff
-	if b == nil {
-		return doServe()
-	}
-
 	for {
-		t := time.Now()
-
-		err := doServe()
-
-		// failure
-		d := b.NextBackOff()
-		if d < 0 || time.Now().Sub(t) > 60*time.Second {
-			b.Reset()
-			continue // next round
+		if ctx.Err() != nil {
+			return nil
 		}
-
-		// backoff
-		c.logger.Log(
-			"level", 1,
-			"action", "serve backoff",
-			"sleep", d,
-			"err", err,
-		)
-		time.Sleep(d)
+		t := time.Now()
+		err := doServe()
+		if ctx.Err() != nil {
+			return nil
+		}
+		if b == nil {
+			return err
+		}
+		d := b.NextBackOff()
+		if ctx.Err() != nil {
+			return nil
+		}
+		if d < 0 || time.Since(t) > 60*time.Second {
+			b.Reset()
+			continue
+		}
+		c.logger.Log("level", 1, "action", "serve backoff", "sleep", d, "err", err)
+		if waitBackoff(ctx, d) != nil {
+			return nil
+		}
 	}
 }
 
-func (c *Client) checkHeartbeat() {
+func (c *Client) checkHeartbeat(run *clientRun) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-
-	for _ = range ticker.C {
-		c.connMu.Lock()
-		if time.Now().Sub(c.lastHeartbeat) > 2*c.config.ServerHeartbeatInterval {
-			if c.conn != nil {
-				c.logger.Log(
-					"level", 1,
-					"action", "closing stale connection",
-				)
-
-				c.conn.Close()
+	for {
+		select {
+		case <-run.ctx.Done():
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			session := run.session
+			stale := session != nil && time.Since(session.lastHeartbeat) > 2*c.config.ServerHeartbeatInterval
+			c.mu.Unlock()
+			if stale {
+				c.logger.Log("level", 1, "action", "closing stale connection")
+				session.conn.Close()
 			}
 		}
-		c.connMu.Unlock()
 	}
 }
 
-func (c *Client) connect() (net.Conn, error) {
-	c.connMu.Lock()
-	defer c.connMu.Unlock()
-
-	if c.conn != nil {
-		return nil, fmt.Errorf("already connected")
+func waitBackoff(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return ctx.Err()
 	}
-
-	conn, err := c.dial()
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to server: %s", err)
-	}
-
-	c.conn = conn
-	c.lastHeartbeat = time.Now()
-
-	return conn, nil
 }
 
-func (c *Client) dial() (net.Conn, error) {
+func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 	var (
 		network   = "tcp"
 		addr      = c.config.ServerAddr
@@ -212,6 +253,9 @@ func (c *Client) dial() (net.Conn, error) {
 	)
 
 	doDial := func() (conn net.Conn, err error) {
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
 		c.logger.Log(
 			"level", 1,
 			"action", "dial",
@@ -225,7 +269,7 @@ func (c *Client) dial() (net.Conn, error) {
 			d := &net.Dialer{
 				Timeout: DefaultTimeout,
 			}
-			conn, err = d.Dial(network, addr)
+			conn, err = d.DialContext(ctx, network, addr)
 
 			if err == nil {
 				err = keepAlive(conn)
@@ -234,10 +278,13 @@ func (c *Client) dial() (net.Conn, error) {
 				conn = tls.Client(conn, tlsConfig)
 			}
 			if err == nil {
-				err = conn.(*tls.Conn).Handshake()
+				err = conn.(*tls.Conn).HandshakeContext(ctx)
 			}
 		}
 
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		if err != nil {
 			if conn != nil {
 				conn.Close()
@@ -263,6 +310,12 @@ func (c *Client) dial() (net.Conn, error) {
 
 	for {
 		conn, err := doDial()
+		if ctx.Err() != nil {
+			if conn != nil {
+				conn.Close()
+			}
+			return nil, ctx.Err()
+		}
 
 		// success
 		if err == nil {
@@ -282,16 +335,18 @@ func (c *Client) dial() (net.Conn, error) {
 			"action", "dial backoff",
 			"sleep", d,
 		)
-		time.Sleep(d)
+		if err := waitBackoff(ctx, d); err != nil {
+			return nil, err
+		}
 	}
 }
 
-func (c *Client) serveHTTP(w http.ResponseWriter, r *http.Request) {
+func (c *Client) serveHTTP(session *clientSession, w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		if r.Header.Get(proto.HeaderError) != "" {
-			c.handleHandshakeError(w, r)
+			c.handleHandshakeError(session, w, r)
 		} else if r.Header.Get(proto.HeaderHeartbeat) != "" {
-			c.handleHeartbeat(w, r)
+			c.handleHeartbeat(session, w, r)
 		} else {
 			c.handleHandshake(w, r)
 		}
@@ -331,7 +386,7 @@ func (c *Client) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-func (c *Client) handleHandshakeError(w http.ResponseWriter, r *http.Request) {
+func (c *Client) handleHandshakeError(session *clientSession, w http.ResponseWriter, r *http.Request) {
 	err := fmt.Errorf(r.Header.Get(proto.HeaderError))
 
 	c.logger.Log(
@@ -341,9 +396,9 @@ func (c *Client) handleHandshakeError(w http.ResponseWriter, r *http.Request) {
 		"err", err,
 	)
 
-	c.connMu.Lock()
-	c.serverErr = fmt.Errorf("server error: %s", err)
-	c.connMu.Unlock()
+	c.mu.Lock()
+	session.serverErr = fmt.Errorf("server error: %s", err)
+	c.mu.Unlock()
 }
 
 func (c *Client) handleHandshake(w http.ResponseWriter, r *http.Request) {
@@ -373,26 +428,27 @@ func (c *Client) handleHandshake(w http.ResponseWriter, r *http.Request) {
 	w.Write(b)
 }
 
-func (c *Client) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
-	c.connMu.Lock()
-	c.lastHeartbeat = time.Now()
-	c.connMu.Unlock()
+func (c *Client) handleHeartbeat(session *clientSession, w http.ResponseWriter, r *http.Request) {
+	c.mu.Lock()
+	session.lastHeartbeat = time.Now()
+	c.mu.Unlock()
 
 	w.WriteHeader(http.StatusOK)
 }
 
-// Stop disconnects client from server.
+// Stop cancels the current Start and closes its connection. Wait for Start to
+// return before restarting. A custom DialTLS callback must return on its own.
 func (c *Client) Stop() {
-	c.connMu.Lock()
-	defer c.connMu.Unlock()
-
-	c.logger.Log(
-		"level", 1,
-		"action", "stop",
-	)
-
-	if c.conn != nil {
-		c.conn.Close()
+	c.mu.Lock()
+	var session *clientSession
+	if c.run != nil {
+		c.run.cancel()
+		session = c.run.session
 	}
-	c.conn = nil
+	c.mu.Unlock()
+
+	c.logger.Log("level", 1, "action", "stop")
+	if session != nil {
+		session.conn.Close()
+	}
 }
