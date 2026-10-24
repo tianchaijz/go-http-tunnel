@@ -755,9 +755,12 @@ func (s *Server) proxyHTTP(identifier id.ID, r *http.Request, msg *proto.Control
 		return nil, fmt.Errorf("proxy request error: %s", err)
 	}
 
+	req = req.WithContext(r.Context())
+
 	go func() {
 		cw := &countWriter{pw, 0}
 		err := r.Write(cw)
+		pw.CloseWithError(err)
 		if err != nil {
 			s.logger.Log(
 				"level", 0,

@@ -100,6 +100,10 @@ func (p *HTTPProxy) Proxy(w io.Writer, r io.ReadCloser, msg *proto.ControlMessag
 		return
 	}
 
+	if r, ok := r.(interface{ Context() context.Context }); ok {
+		req = req.WithContext(r.Context())
+	}
+
 	setXForwardedFor(req.Header, msg.RemoteAddr)
 	req.URL.Host = msg.ForwardedHost
 

@@ -5,10 +5,20 @@
 package tunnel
 
 import (
+	"context"
 	"io"
 
 	"github.com/mmatczuk/go-http-tunnel/proto"
 )
+
+type proxyReader struct {
+	io.ReadCloser
+	ctx context.Context
+}
+
+func (r *proxyReader) Context() context.Context {
+	return r.ctx
+}
 
 // ProxyFunc is responsible for forwarding a remote connection to local server
 // and writing the response.
