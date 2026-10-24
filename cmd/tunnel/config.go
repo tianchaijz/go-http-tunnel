@@ -86,6 +86,9 @@ func loadClientConfigFromFile(file string) (*ClientConfig, error) {
 	}
 
 	for name, t := range c.Tunnels {
+		if t == nil {
+			return nil, fmt.Errorf("%s missing tunnel configuration", name)
+		}
 		switch t.Protocol {
 		case proto.HTTP:
 			if err := validateHTTP(t); err != nil {

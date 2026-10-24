@@ -424,6 +424,12 @@ func (s *Server) notifyError(serverError error, session *connPair) {
 // addTunnels invokes addHost or addListener based on data from proto.Tunnel. If
 // a tunnel cannot be added whole batch is reverted.
 func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, session *connPair) error {
+	for name, t := range tunnels {
+		if t == nil {
+			return fmt.Errorf("missing configuration for tunnel %s", name)
+		}
+	}
+
 	identifier := session.identifier
 	i := &RegistryItem{
 		Tag:       session.tag,
