@@ -64,6 +64,7 @@ func echoTCP(l net.Listener) {
 			return
 		}
 		go func() {
+			defer conn.Close()
 			io.Copy(conn, conn)
 		}()
 	}
@@ -113,7 +114,7 @@ func makeTunnelClient(t testing.TB, serverAddr string, httpLocalAddr, httpAddr, 
 	}, log.NewStdLogger())
 
 	tcpProxy := tunnel.NewMultiTCPProxy(map[string]string{
-		port(tcpLocalAddr): tcpAddr.String(),
+		proto.TCP: tcpAddr.String(),
 	}, log.NewStdLogger())
 
 	tunnels := map[string]*proto.Tunnel{
@@ -123,8 +124,9 @@ func makeTunnelClient(t testing.TB, serverAddr string, httpLocalAddr, httpAddr, 
 			Auth:     "user:password",
 		},
 		proto.TCP: {
-			Protocol: proto.TCP,
-			Addr:     tcpLocalAddr.String(),
+			Protocol:   proto.TCP,
+			Addr:       tcpAddr.String(),
+			RemoteAddr: tcpLocalAddr.String(),
 		},
 	}
 
@@ -191,13 +193,13 @@ func TestIntegration(t *testing.T) {
 
 			wg.Add(1)
 			go func() {
+				defer wg.Done()
 				testHTTP(t, h.Listener.Addr(), p, r)
-				wg.Done()
 			}()
 			wg.Add(1)
 			go func() {
+				defer wg.Done()
 				testTCP(t, tcpLocalAddr, p, r)
-				wg.Done()
 			}()
 		}
 	}
@@ -216,12 +218,13 @@ func testHTTP(t testing.TB, addr net.Addr, payload []byte, repeat uint) {
 
 		resp, err := http.DefaultClient.Do(r)
 		if err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
 		if resp.StatusCode != http.StatusOK {
 			t.Error("Unexpected status code", resp)
 		}
 		b, err := ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
 		if err != nil {
 			t.Error("Read error")
 		}
