@@ -162,7 +162,7 @@ Configuration options:
 * `tls_key`: path to client TLS certificate key, *default:* `client.key` *in the config file directory*
 * `root_ca`: path to trusted root certificate authority pool file, if empty any server certificate is accepted
 *  `tunnels / [name]`
-    * `proto`: tunnel protocol, `http` or `tcp`
+    * `proto`: tunnel protocol, `http`, `tcp`, `tcp4`, or `tcp6`
     * `addr`: forward traffic to this local port number or network address, for `proto=http` this can be full URL i.e. `https://machine/sub/path/?plus=params`, supports URL schemes `http` and `https`
     * `auth`: (`proto=http`) (optional) basic authentication credentials to enforce on tunneled requests, format `user:password`
     * `host`: (`proto=http`) hostname to request (requires reserved name and DNS CNAME)

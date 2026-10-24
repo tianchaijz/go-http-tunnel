@@ -18,12 +18,6 @@ import (
 type TCPProxy struct {
 	// localAddr specifies default TCP address of the local server.
 	localAddr string
-	// localAddrMap specifies mapping from ControlMessage.ForwardedHost to
-	// local server address, keys may contain host and port, only host or
-	// only port. The order of precedence is the following
-	// * host and port
-	// * port
-	// * host
 	localAddrMap map[string]string
 	// logger is the proxy logger.
 	logger log.Logger
