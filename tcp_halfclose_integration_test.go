@@ -1,7 +1,6 @@
 package tunnel_test
 
 import (
-	"crypto/tls"
 	"io"
 	"net"
 	"testing"
@@ -12,11 +11,7 @@ import (
 )
 
 func TestPublicTCPHalfClose(t *testing.T) {
-	cert, err := tls.LoadX509KeyPair("testdata/selfsigned.crt", "testdata/selfsigned.key")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := &tls.Config{Certificates: []tls.Certificate{cert}, ClientAuth: tls.RequireAnyClientCert, InsecureSkipVerify: true}
+	cfg := tlsConfig()
 	backend, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -58,8 +53,16 @@ func TestPublicTCPHalfClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go client.Start()
-	defer client.Stop()
+	clientDone := make(chan struct{})
+	go func() { client.Start(); close(clientDone) }()
+	defer func() {
+		client.Stop()
+		select {
+		case <-clientDone:
+		case <-time.After(3 * time.Second):
+			t.Error("client did not stop")
+		}
+	}()
 	var conn net.Conn
 	for i := 0; i < 100; i++ {
 		conn, err = net.DialTimeout("tcp", public, 100*time.Millisecond)
