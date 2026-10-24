@@ -134,6 +134,7 @@ func (c *halfCloseConn) Read(p []byte) (int, error) {
 
 func TestServerTCPResponseCompletionJoinsUpload(t *testing.T) {
 	for _, fail := range []bool{false, true} {
+		fail := fail
 		t.Run(fmt.Sprint(fail), func(t *testing.T) {
 			local, remote := net.Pipe()
 			defer remote.Close()
