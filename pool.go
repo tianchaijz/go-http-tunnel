@@ -65,22 +65,42 @@ func (p *connPool) MarkDead(c *http2.ClientConn) {
 }
 
 func (p *connPool) AddConn(conn net.Conn, identifier id.ID) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	addr := p.addr(identifier)
 
-	if cp, ok := p.conns[addr]; ok {
-		if err := p.ping(cp); err != nil {
-			p.close(cp, addr)
-		} else {
+	for {
+		p.mu.RLock()
+		cp, ok := p.conns[addr]
+		p.mu.RUnlock()
+		if !ok {
+			break
+		}
+
+		err := p.ping(cp)
+		p.mu.Lock()
+		if current, ok := p.conns[addr]; !ok || current.clientConn != cp.clientConn {
+			p.mu.Unlock()
+			continue
+		}
+		if err == nil {
+			p.mu.Unlock()
 			return errClientAlreadyConnected
 		}
+		p.close(cp, addr)
+		p.mu.Unlock()
+		break
 	}
 
 	c, err := p.t.NewClientConn(conn)
 	if err != nil {
 		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.conns[addr]; ok {
+		return errClientAlreadyConnected
+	}
+	if !c.CanTakeNewRequest() {
+		return errClientNotConnected
 	}
 	p.conns[addr] = connPair{
 		conn:       conn,
@@ -102,12 +122,12 @@ func (p *connPool) DeleteConn(identifier id.ID) {
 }
 
 func (p *connPool) Ping(identifier id.ID) (time.Duration, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	addr := p.addr(identifier)
+	p.mu.RLock()
+	cp, ok := p.conns[addr]
+	p.mu.RUnlock()
 
-	if cp, ok := p.conns[addr]; ok {
+	if ok {
 		start := time.Now()
 		err := p.ping(cp)
 		return time.Since(start), err
