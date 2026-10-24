@@ -16,7 +16,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -469,7 +468,7 @@ func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, session *connPair)
 							"addr", addr,
 							"err", err,
 						)
-						if !errors.Is(err, syscall.EADDRINUSE) {
+						if !errors.Is(err, errAddrInUse) {
 							goto rollback
 						}
 						continue
