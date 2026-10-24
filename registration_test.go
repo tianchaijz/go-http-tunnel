@@ -22,7 +22,6 @@ func TestRegistrationRejectsInvalidBatch(t *testing.T) {
 		{"missing auth user", map[string]*proto.Tunnel{"bad": {Protocol: proto.HTTP, Host: "example.test", Auth: ":password"}}},
 		{"missing TCP address", map[string]*proto.Tunnel{"bad": {Protocol: proto.TCP}}},
 		{"missing UNIX address", map[string]*proto.Tunnel{"bad": {Protocol: proto.UNIX}}},
-		{"missing port", map[string]*proto.Tunnel{"bad": {Protocol: proto.TCP, RemoteAddr: "127.0.0.1:"}}},
 		{"malformed address", map[string]*proto.Tunnel{"bad": {Protocol: proto.TCP, RemoteAddr: "127.0.0.1"}}},
 		{"duplicate canonical hosts", map[string]*proto.Tunnel{
 			"first":  {Protocol: proto.HTTP, Host: "example.test:80"},
@@ -102,5 +101,27 @@ func TestRegistrationPreservesInputAndAuth(t *testing.T) {
 				t.Fatalf("allocated address = %q", row.Address)
 			}
 		}
+	}
+}
+
+func TestRegistrationEmptyPortUsesOSAllocation(t *testing.T) {
+	s, session := portTestServer(t, 30000)
+	raw := &proto.Tunnel{Protocol: proto.TCP, RemoteAddr: "127.0.0.1:"}
+	if err := s.addTunnels(map[string]*proto.Tunnel{"tcp": raw}, session); err != nil {
+		t.Fatalf("empty port must retain net.Listen allocation: %v", err)
+	}
+	rows := s.registry.dashboardSnapshot()
+	if len(rows) != 1 {
+		t.Fatalf("registered tunnels = %v", rows)
+	}
+	_, port, err := net.SplitHostPort(rows[0].Address)
+	if err != nil || port == "" || port == "0" {
+		t.Fatalf("OS allocated address = %q", rows[0].Address)
+	}
+	if next := s.registry.portPool.Get(); next != 30001 {
+		t.Fatalf("OS allocation consumed a pooled port: next = %d", next)
+	}
+	if raw.RemoteAddr != "127.0.0.1:" {
+		t.Fatalf("registration changed input to %q", raw.RemoteAddr)
 	}
 }
