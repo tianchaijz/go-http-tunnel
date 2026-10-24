@@ -7,22 +7,16 @@ package tunnel
 import (
 	"context"
 	"io"
+	"net/http"
 
 	"github.com/mmatczuk/go-http-tunnel/proto"
 )
 
-type proxyReader struct {
-	io.ReadCloser
-	ctx context.Context
-}
-
-func (r *proxyReader) Context() context.Context {
-	return r.ctx
-}
-
 // ProxyFunc is responsible for forwarding a remote connection to local server
-// and writing the response.
-type ProxyFunc func(w io.Writer, r io.ReadCloser, msg *proto.ControlMessage)
+// and writing the response. Implementations close r and write setup errors before
+// streaming. Transfer failures after streaming begins must end the transfer without
+// writing another HTTP error response.
+type ProxyFunc func(ctx context.Context, w http.ResponseWriter, r io.ReadCloser, msg *proto.ControlMessage)
 
 // ProxyFuncs is a collection of ProxyFunc.
 type ProxyFuncs struct {
@@ -34,19 +28,25 @@ type ProxyFuncs struct {
 
 // Proxy returns a ProxyFunc that uses custom function if provided.
 func Proxy(p ProxyFuncs) ProxyFunc {
-	return func(w io.Writer, r io.ReadCloser, msg *proto.ControlMessage) {
+	return func(ctx context.Context, w http.ResponseWriter, r io.ReadCloser, msg *proto.ControlMessage) {
 		var f ProxyFunc
 		switch msg.ForwardedProto {
 		case proto.HTTP, proto.HTTPS:
 			f = p.HTTP
 		case proto.TCP, proto.TCP4, proto.TCP6, proto.UNIX:
 			f = p.TCP
-		}
-
-		if f == nil {
+		default:
+			defer r.Close()
+			http.Error(w, "unsupported proxy protocol", http.StatusBadRequest)
 			return
 		}
 
-		f(w, r, msg)
+		if f == nil {
+			defer r.Close()
+			http.Error(w, "proxy is not configured", http.StatusBadGateway)
+			return
+		}
+
+		f(ctx, w, r, msg)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/http"
 
 	"github.com/mmatczuk/go-http-tunnel/log"
 	"github.com/mmatczuk/go-http-tunnel/proto"
@@ -55,7 +56,7 @@ func NewMultiTCPProxy(localAddrMap map[string]string, logger log.Logger) *TCPPro
 }
 
 // Proxy is a ProxyFunc.
-func (p *TCPProxy) Proxy(w io.Writer, r io.ReadCloser, msg *proto.ControlMessage) {
+func (p *TCPProxy) Proxy(ctx context.Context, w http.ResponseWriter, r io.ReadCloser, msg *proto.ControlMessage) {
 	defer r.Close()
 	switch msg.ForwardedProto {
 	case proto.TCP, proto.TCP4, proto.TCP6, proto.UNIX:
@@ -66,6 +67,7 @@ func (p *TCPProxy) Proxy(w io.Writer, r io.ReadCloser, msg *proto.ControlMessage
 			"msg", "unsupported protocol",
 			"ctrlMsg", msg,
 		)
+		http.Error(w, "unsupported proxy protocol", http.StatusBadRequest)
 		return
 	}
 
@@ -76,12 +78,8 @@ func (p *TCPProxy) Proxy(w io.Writer, r io.ReadCloser, msg *proto.ControlMessage
 			"msg", "no target",
 			"ctrlMsg", msg,
 		)
+		http.Error(w, "no proxy target", http.StatusBadGateway)
 		return
-	}
-
-	ctx := context.Background()
-	if reader, ok := r.(interface{ Context() context.Context }); ok {
-		ctx = reader.Context()
 	}
 	dialer := net.Dialer{Timeout: DefaultTimeout}
 	local, err := dialer.DialContext(ctx, "tcp", target)
@@ -93,6 +91,7 @@ func (p *TCPProxy) Proxy(w io.Writer, r io.ReadCloser, msg *proto.ControlMessage
 			"ctrlMsg", msg,
 			"err", err,
 		)
+		http.Error(w, "proxy dial failed", http.StatusBadGateway)
 		return
 	}
 	defer local.Close()

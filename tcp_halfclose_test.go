@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -37,12 +38,12 @@ func TestTCPProxyUploadEOF(t *testing.T) {
 		}
 		backend <- err
 	}()
-	var out bytes.Buffer
-	NewTCPProxy(l.Addr().String(), nil).Proxy(&out, io.NopCloser(bytes.NewBufferString("request")), &proto.ControlMessage{ForwardedProto: proto.TCP})
+	out := httptest.NewRecorder()
+	NewTCPProxy(l.Addr().String(), nil).Proxy(context.Background(), out, io.NopCloser(bytes.NewBufferString("request")), &proto.ControlMessage{ForwardedProto: proto.TCP})
 	if err := <-backend; err != nil {
 		t.Error(err)
 	}
-	if got := out.String(); got != "reply:request" {
+	if got := out.Body.String(); got != "reply:request" {
 		t.Fatalf("response = %q, want reply:request", got)
 	}
 }
@@ -65,7 +66,7 @@ func TestTCPProxyBackendEOFAndCancellation(t *testing.T) {
 				cancel()
 			}
 			go func() {
-				NewTCPProxy(l.Addr().String(), nil).Proxy(io.Discard, &proxyReader{ReadCloser: pr, ctx: ctx}, &proto.ControlMessage{ForwardedProto: proto.TCP})
+				NewTCPProxy(l.Addr().String(), nil).Proxy(ctx, httptest.NewRecorder(), pr, &proto.ControlMessage{ForwardedProto: proto.TCP})
 				close(done)
 			}()
 			if mode != "cancel before dial" {
@@ -109,7 +110,7 @@ func (r *halfCloseReader) Close() error { r.closed = true; return r.ReadCloser.C
 
 func TestTCPProxyFailedDialClosesUpload(t *testing.T) {
 	r := &halfCloseReader{ReadCloser: io.NopCloser(bytes.NewReader(nil))}
-	NewTCPProxy("invalid address", nil).Proxy(io.Discard, r, &proto.ControlMessage{ForwardedProto: proto.TCP})
+	NewTCPProxy("invalid address", nil).Proxy(context.Background(), httptest.NewRecorder(), r, &proto.ControlMessage{ForwardedProto: proto.TCP})
 	if !r.closed {
 		t.Fatal("failed dial left upload open")
 	}
@@ -170,6 +171,7 @@ func TestServerTCPResponseCompletionJoinsUpload(t *testing.T) {
 }
 
 type halfCloseWriter struct {
+	*httptest.ResponseRecorder
 	entered  chan struct{}
 	release  chan struct{}
 	finished chan struct{}
@@ -191,11 +193,11 @@ func TestTCPProxyJoinsResponseWriter(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer pr.Close()
 	defer pw.Close()
-	w := &halfCloseWriter{entered: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
+	w := &halfCloseWriter{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
 	defer close(w.release)
 	done := make(chan struct{})
 	go func() {
-		NewTCPProxy(l.Addr().String(), nil).Proxy(w, pr, &proto.ControlMessage{ForwardedProto: proto.TCP})
+		NewTCPProxy(l.Addr().String(), nil).Proxy(context.Background(), w, pr, &proto.ControlMessage{ForwardedProto: proto.TCP})
 		close(done)
 	}()
 	l.(*net.TCPListener).SetDeadline(time.Now().Add(3 * time.Second))

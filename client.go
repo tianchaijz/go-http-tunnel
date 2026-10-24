@@ -375,7 +375,7 @@ func (c *Client) serveHTTP(session *clientSession, w http.ResponseWriter, r *htt
 	)
 	switch msg.Action {
 	case proto.ActionProxy:
-		c.config.Proxy(w, &proxyReader{ReadCloser: r.Body, ctx: r.Context()}, msg)
+		c.config.Proxy(r.Context(), w, r.Body, msg)
 	default:
 		c.logger.Log(
 			"level", 0,

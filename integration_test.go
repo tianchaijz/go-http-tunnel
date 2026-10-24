@@ -384,13 +384,16 @@ func testHTTPPublicCancellation(t *testing.T, upload bool) {
 	}
 	s := makeTunnelServer(t)
 	defer s.Stop()
+	httpProxy := tunnel.NewHTTPProxy(target, nil)
 	c, err := tunnel.NewClient(&tunnel.ClientConfig{
 		ServerAddr:      s.Addr(),
 		TLSClientConfig: tlsConfig(),
 		Tunnels: map[string]*proto.Tunnel{
 			"web": {Protocol: proto.HTTP, Host: "cancel.test"},
 		},
-		Proxy: tunnel.Proxy(tunnel.ProxyFuncs{HTTP: tunnel.NewHTTPProxy(target, nil).Proxy}),
+		Proxy: tunnel.Proxy(tunnel.ProxyFuncs{HTTP: func(ctx context.Context, w http.ResponseWriter, r io.ReadCloser, msg *proto.ControlMessage) {
+			httpProxy.Proxy(ctx, w, struct{ io.ReadCloser }{r}, msg)
+		}}),
 	})
 	if err != nil {
 		t.Fatal(err)

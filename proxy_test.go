@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -33,7 +34,7 @@ func TestProxySetupErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			body := &halfCloseReader{ReadCloser: io.NopCloser(strings.NewReader(tc.request))}
 			response := httptest.NewRecorder()
-			tc.proxy(response, body, &proto.ControlMessage{ForwardedProto: tc.protocol})
+			tc.proxy(context.Background(), response, body, &proto.ControlMessage{ForwardedProto: tc.protocol})
 			if response.Code != tc.status {
 				t.Errorf("status = %d, want %d; body = %q", response.Code, tc.status, response.Body.String())
 			}
@@ -72,6 +73,8 @@ func TestHTTPProxyURLRewrite(t *testing.T) {
 		{"root slash", "/base", "/", "/base/"},
 		{"repeated slash", "/base/", "/child//leaf", "/base/child//leaf"},
 		{"escaped path", "/base%2Fprefix/", "/child%2Fleaf/", "/base%2Fprefix/child%2Fleaf/"},
+		{"escaped target", "/base%2Fprefix/", "/child/", "/base%2Fprefix/child/"},
+		{"escaped request", "/base/", "/child%2Fleaf/", "/base/child%2Fleaf/"},
 		{"query", "/base/?a=1", "/child/?b=2", "/base/child/?a=1&b=2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -88,13 +91,92 @@ func TestHTTPProxyURLRewrite(t *testing.T) {
 			}
 			p := NewHTTPProxy(target, nil)
 			response := httptest.NewRecorder()
-			p.Proxy(response, io.NopCloser(strings.NewReader("GET "+tc.request+" HTTP/1.1\r\nHost: public.example\r\n\r\n")), &proto.ControlMessage{ForwardedProto: proto.HTTP, ForwardedHost: "public.example", RemoteAddr: "192.0.2.1:1234"})
+			p.Proxy(context.Background(), response, io.NopCloser(strings.NewReader("GET "+tc.request+" HTTP/1.1\r\nHost: public.example\r\n\r\n")), &proto.ControlMessage{ForwardedProto: proto.HTTP, ForwardedHost: "public.example", RemoteAddr: "192.0.2.1:1234"})
 			if response.Code != http.StatusCreated {
 				t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
 			}
 			request := <-got
 			if request.uri != tc.want || request.host != target.Host || request.userAgent != "" || request.forwardedFor != "192.0.2.1" {
 				t.Errorf("backend request = %+v, want URI %q, host %q, empty user agent, forwarded client", request, tc.want, target.Host)
+			}
+		})
+	}
+}
+
+func TestProxyPassesContextAndResponseWriter(t *testing.T) {
+	for _, protocol := range []string{proto.HTTP, proto.HTTPS, proto.TCP, proto.TCP4, proto.TCP6, proto.UNIX} {
+		t.Run(protocol, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			response := httptest.NewRecorder()
+			body := io.NopCloser(strings.NewReader("upload"))
+			msg := &proto.ControlMessage{ForwardedProto: protocol}
+			called := false
+			callback := func(gotCtx context.Context, w http.ResponseWriter, r io.ReadCloser, gotMsg *proto.ControlMessage) {
+				defer r.Close()
+				called = true
+				if gotCtx != ctx || w != response || r != body || gotMsg != msg {
+					t.Error("dispatcher changed callback arguments")
+				}
+				w.WriteHeader(http.StatusAccepted)
+			}
+			Proxy(ProxyFuncs{HTTP: callback, TCP: callback})(ctx, response, body, msg)
+			if !called || response.Code != http.StatusAccepted {
+				t.Fatalf("callback called = %v, status = %d", called, response.Code)
+			}
+		})
+	}
+}
+
+func TestHTTPProxyReverseProxyCustomization(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, r.Header.Get("X-Custom-Director"))
+	}))
+	defer backend.Close()
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"Proxy", "ServeHTTP"} {
+		t.Run(method, func(t *testing.T) {
+			p := NewHTTPProxy(target, nil)
+			director := p.ReverseProxy.Director
+			p.ReverseProxy.Director = func(req *http.Request) {
+				director(req)
+				req.Header.Set("X-Custom-Director", "customized")
+			}
+			transportCalls := 0
+			transportError := errors.New("custom transport failed")
+			p.Transport = halfCloseTransport(func(req *http.Request) (*http.Response, error) {
+				transportCalls++
+				if transportCalls == 2 {
+					return nil, transportError
+				}
+				return http.DefaultTransport.RoundTrip(req)
+			})
+			p.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
+				if !errors.Is(err, transportError) {
+					t.Errorf("transport error = %v", err)
+				}
+				http.Error(w, "custom error", http.StatusServiceUnavailable)
+			}
+			for _, fail := range []bool{false, true} {
+				response := httptest.NewRecorder()
+				if method == "ServeHTTP" {
+					p.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://public.example/path", nil))
+				} else {
+					p.Proxy(context.Background(), response, io.NopCloser(strings.NewReader("GET /path HTTP/1.1\r\nHost: public.example\r\n\r\n")), &proto.ControlMessage{ForwardedProto: proto.HTTP})
+				}
+				if fail {
+					if response.Code != http.StatusServiceUnavailable || response.Body.String() != "custom error\n" {
+						t.Fatalf("custom error response = %d %q", response.Code, response.Body.String())
+					}
+				} else if response.Code != http.StatusOK || response.Body.String() != "customized" {
+					t.Fatalf("custom director response = %d %q", response.Code, response.Body.String())
+				}
+			}
+			if transportCalls != 2 {
+				t.Fatalf("custom transport calls = %d, want 2", transportCalls)
 			}
 		})
 	}

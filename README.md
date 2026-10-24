@@ -196,3 +196,28 @@ A GitHub star is always appreciated!
 Copyright (C) 2017 Michał Matczuk
 
 This project is distributed under the AGPL-3 license. See the [LICENSE](https://github.com/mmatczuk/go-http-tunnel/blob/master/LICENSE) file for details. If you need an enterprice license contact me directly.
+
+## Migrate custom proxy callbacks
+
+`ProxyFunc` now takes an explicit `context.Context` and `http.ResponseWriter`.
+This is a source-breaking API change. Update custom callbacks and direct calls
+to `HTTPProxy.Proxy` or `TCPProxy.Proxy` with both arguments. Method values used
+in `ProxyFuncs` continue to work after recompilation.
+
+```go
+httpProxy := tunnel.NewHTTPProxy(targetURL, logger)
+callback := func(ctx context.Context, w http.ResponseWriter, r io.ReadCloser, msg *proto.ControlMessage) {
+	httpProxy.Proxy(ctx, w, r, msg)
+}
+config.Proxy = tunnel.Proxy(tunnel.ProxyFuncs{HTTP: callback})
+
+// Direct calls pass the request lifetime and response writer.
+httpProxy.Proxy(req.Context(), w, req.Body, msg)
+```
+
+The callback owns closing its input. Write setup failures to the response before
+streaming begins. Once streaming starts, log failures and end the transfer.
+Callbacks have no error return. Pass the context through reader decorators so
+cancellation still reaches the backend. A plain `io.Writer`, such as
+`bytes.Buffer`, no longer satisfies the signature. Direct tests can use
+`httptest.NewRecorder()`.

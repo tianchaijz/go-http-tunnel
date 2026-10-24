@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"path"
 
 	"github.com/mmatczuk/go-http-tunnel/log"
 	"github.com/mmatczuk/go-http-tunnel/proto"
@@ -67,7 +66,8 @@ func NewMultiHTTPProxy(localURLMap map[string]*url.URL, logger log.Logger) *HTTP
 }
 
 // Proxy is a ProxyFunc.
-func (p *HTTPProxy) Proxy(w io.Writer, r io.ReadCloser, msg *proto.ControlMessage) {
+func (p *HTTPProxy) Proxy(ctx context.Context, w http.ResponseWriter, r io.ReadCloser, msg *proto.ControlMessage) {
+	defer r.Close()
 	switch msg.ForwardedProto {
 	case proto.HTTP, proto.HTTPS:
 		// ok
@@ -77,16 +77,8 @@ func (p *HTTPProxy) Proxy(w io.Writer, r io.ReadCloser, msg *proto.ControlMessag
 			"msg", "unsupported protocol",
 			"ctrlMsg", msg,
 		)
+		http.Error(w, "unsupported proxy protocol", http.StatusBadRequest)
 		return
-	}
-
-	rw, ok := w.(http.ResponseWriter)
-	if !ok {
-		p.logger.Log(
-			"level", 0,
-			"msg", "expected http.ResponseWriter",
-			"ctrlMsg", msg,
-		)
 	}
 
 	req, err := http.ReadRequest(bufio.NewReader(r))
@@ -97,17 +89,24 @@ func (p *HTTPProxy) Proxy(w io.Writer, r io.ReadCloser, msg *proto.ControlMessag
 			"ctrlMsg", msg,
 			"err", err,
 		)
+		http.Error(w, "invalid HTTP request", http.StatusBadRequest)
 		return
 	}
-
-	if r, ok := r.(interface{ Context() context.Context }); ok {
-		req = req.WithContext(r.Context())
-	}
+	req = req.WithContext(ctx)
 
 	setXForwardedFor(req.Header, msg.RemoteAddr)
 	req.URL.Host = msg.ForwardedHost
 
-	p.ServeHTTP(rw, req)
+	p.ServeHTTP(w, req)
+}
+
+// ServeHTTP rejects requests without a configured target before forwarding.
+func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if p.localURLFor(req.URL) == nil {
+		http.Error(w, "no proxy target", http.StatusBadGateway)
+		return
+	}
+	p.ReverseProxy.ServeHTTP(w, req)
 }
 
 // Director is ReverseProxy Director it changes request URL so that the request
@@ -124,22 +123,14 @@ func (p *HTTPProxy) Director(req *http.Request) {
 			"url", req.URL,
 		)
 
-		_, cancel := context.WithCancel(req.Context())
+		ctx, cancel := context.WithCancel(req.Context())
 		cancel()
+		*req = *req.WithContext(ctx)
 
 		return
 	}
 
-	req.URL.Host = target.Host
-	req.URL.Scheme = target.Scheme
-	req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
-
-	targetQuery := target.RawQuery
-	if targetQuery == "" || req.URL.RawQuery == "" {
-		req.URL.RawQuery = targetQuery + req.URL.RawQuery
-	} else {
-		req.URL.RawQuery = targetQuery + "&" + req.URL.RawQuery
-	}
+	httputil.NewSingleHostReverseProxy(target).Director(req)
 	if _, ok := req.Header["User-Agent"]; !ok {
 		// explicitly disable User-Agent so it's not set to default value
 		req.Header.Set("User-Agent", "")
@@ -153,17 +144,6 @@ func (p *HTTPProxy) Director(req *http.Request) {
 		"from", &orig,
 		"to", req.URL,
 	)
-}
-
-func singleJoiningSlash(a, b string) string {
-	if a == "" || a == "/" {
-		return b
-	}
-	if b == "" || b == "/" {
-		return a
-	}
-
-	return path.Join(a, b)
 }
 
 func (p *HTTPProxy) localURLFor(u *url.URL) *url.URL {
