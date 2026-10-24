@@ -60,6 +60,14 @@ package:
 	mkdir -p "$(OUTPUT_DIR)/dist"
 	@set -e; cd "$(OUTPUT_DIR)/pkg"; \
 	for osarch in *; do \
+		ext=; case "$$osarch" in windows_*) ext=.exe;; esac; \
+		for binary in tunnel tunneld; do \
+			if [ ! -s "$$osarch/$$binary$$ext" ]; then \
+				printf 'Incomplete platform build: %s/%s%s\n' "$$osarch" "$$binary" "$$ext" >&2; exit 1; \
+			fi; \
+		done; \
+	done; \
+	for osarch in *; do \
 		tar -czf "../dist/tunnel_$$osarch.tar.gz" -C "$$osarch" .; \
 	done
 	cd "$(OUTPUT_DIR)/dist" && sha256sum tunnel_*.tar.gz > SHA256SUMS
