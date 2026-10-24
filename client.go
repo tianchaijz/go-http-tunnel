@@ -374,7 +374,9 @@ func (c *Client) handleHandshake(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Client) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	c.connMu.Lock()
 	c.lastHeartbeat = time.Now()
+	c.connMu.Unlock()
 
 	w.WriteHeader(http.StatusOK)
 }
