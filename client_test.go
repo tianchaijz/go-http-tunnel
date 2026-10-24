@@ -8,7 +8,9 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +18,32 @@ import (
 	"github.com/mmatczuk/go-http-tunnel/proto"
 	"github.com/mmatczuk/go-http-tunnel/tunnelmock"
 )
+
+func TestClient_ConcurrentHeartbeats(t *testing.T) {
+	t.Parallel()
+
+	c := &Client{}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := httptest.NewRequest(http.MethodConnect, "/", nil)
+			r.Header.Set(proto.HeaderHeartbeat, "true")
+			w := httptest.NewRecorder()
+
+			<-start
+			c.serveHTTP(w, r)
+
+			if w.Code != http.StatusOK {
+				t.Errorf("Heartbeat status = %d, want %d", w.Code, http.StatusOK)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
 
 func TestClient_Dial(t *testing.T) {
 	t.Parallel()
