@@ -6,6 +6,7 @@ package tunnel_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -337,4 +338,95 @@ func tlsConfig() *tls.Config {
 	}
 	c.BuildNameToCertificate()
 	return c
+}
+
+func TestHTTPPublicCancellation(t *testing.T) {
+	arrived := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		select {
+		case <-r.Context().Done():
+			close(canceled)
+		case <-release:
+		}
+	}))
+	defer backend.Close()
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := makeTunnelServer(t)
+	defer s.Stop()
+	c, err := tunnel.NewClient(&tunnel.ClientConfig{
+		ServerAddr:      s.Addr(),
+		TLSClientConfig: tlsConfig(),
+		Tunnels: map[string]*proto.Tunnel{
+			"web": {Protocol: proto.HTTP, Host: "cancel.test"},
+		},
+		Proxy: tunnel.Proxy(tunnel.ProxyFuncs{HTTP: tunnel.NewHTTPProxy(target, nil).Proxy}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientDone := make(chan error, 1)
+	go func() { clientDone <- c.Start() }()
+	defer func() {
+		c.Stop()
+		select {
+		case <-clientDone:
+		case <-time.After(3 * time.Second):
+			t.Error("tunnel client did not stop")
+		}
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, _, ok := s.Subscriber("cancel.test"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("HTTP tunnel was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	front := httptest.NewServer(s)
+	defer func() {
+		close(release)
+		front.Close()
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, front.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "cancel.test"
+	done := make(chan error, 1)
+	go func() {
+		resp, err := front.Client().Do(req)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		done <- err
+	}()
+	select {
+	case <-arrived:
+	case <-time.After(3 * time.Second):
+		t.Fatal("backend request did not arrive")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("canceled public request succeeded")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("public request did not stop")
+	}
+	select {
+	case <-canceled:
+	case <-time.After(3 * time.Second):
+		t.Error("backend request remained active after public HTTP cancellation")
+	}
 }
