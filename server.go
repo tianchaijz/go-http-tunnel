@@ -446,6 +446,7 @@ func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, session *connPair)
 		switch t.Protocol {
 		case proto.HTTP:
 			i.Hosts = append(i.Hosts, &HostAuth{t.Host, NewAuth(t.Auth)})
+			i.dashboard = append(i.dashboard, dashboardTunnel{Name: name, Protocol: t.Protocol, Address: t.Host})
 		case proto.TCP, proto.TCP4, proto.TCP6, proto.UNIX:
 			host, portText, splitErr := net.SplitHostPort(t.RemoteAddr)
 			if t.Protocol != proto.UNIX && splitErr == nil && zeroPortRe.MatchString(portText) {
@@ -494,6 +495,7 @@ func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, session *connPair)
 
 			tunnelName = name
 			i.Listeners = append(i.Listeners, Listener{l, tunnelName})
+			i.dashboard = append(i.dashboard, dashboardTunnel{Name: name, Protocol: t.Protocol, Address: l.Addr().String()})
 		default:
 			err = fmt.Errorf("unsupported protocol for tunnel %s: %s", name, t.Protocol)
 			goto rollback

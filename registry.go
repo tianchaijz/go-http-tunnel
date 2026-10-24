@@ -56,6 +56,7 @@ type RegistryItem struct {
 	Hosts     []*HostAuth
 	Listeners []Listener
 	Ports     []uint64
+	dashboard []dashboardTunnel
 }
 
 // HostAuth holds host and authentication info.

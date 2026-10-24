@@ -7,11 +7,13 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/net/http2"
 
@@ -98,7 +100,22 @@ func main() {
 		}()
 	}
 
+	if opts.dashboardAddr != "" {
+		dashboard := startDashboard(opts.dashboardAddr, server.DashboardHandler())
+		defer dashboard.Close()
+	}
+
 	server.Start()
+}
+
+func startDashboard(addr string, handler http.Handler) *http.Server {
+	dashboard := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := dashboard.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fatal("failed to start dashboard: %s", err)
+		}
+	}()
+	return dashboard
 }
 
 func tlsConfig(opts *options) (*tls.Config, error) {

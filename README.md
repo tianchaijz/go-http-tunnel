@@ -67,6 +67,18 @@ $ tunneld -tlsCrt .tunneld/server.crt -tlsKey .tunneld/server.key
 
 This will run HTTP server on port `80` and HTTPS (HTTP/2) server on port `443`. If you want to use HTTPS it's recommended to get a properly signed certificate to avoid security warnings.
 
+To enable the Chinese dashboard, add `-dashboardAddr 127.0.0.1:8081` and open
+`http://127.0.0.1:8081/`. It lists registered tunnels, their actual listening
+addresses and TCP ports, and refreshes every ten seconds. HTTP tunnels share the
+public HTTP/HTTPS listeners and have no dedicated port. UNIX sockets have no TCP
+port. The dashboard is disabled by default and uses a separate listener, so public
+application routes remain available.
+
+The dashboard has no authentication. Bind it to loopback or another trusted
+interface. It shows registration snapshots, not backend health, and omits backend
+addresses and credentials. Library users can serve `Server.DashboardHandler()` on
+a separate HTTP server.
+
 ## Configuration
 
 The tunnel client `tunnel` requires configuration file, by default it will try reading `tunnel.yml` in your current working directory. If you want to specify other file use `-config` flag.
