@@ -27,7 +27,7 @@ func normalizeAddress(addr string) (string, error) {
 		host = "127.0.0.1"
 	}
 
-	return fmt.Sprintf("%s:%s", host, port), nil
+	return net.JoinHostPort(host, port), nil
 }
 
 func normalizeURL(rawurl string) (string, error) {

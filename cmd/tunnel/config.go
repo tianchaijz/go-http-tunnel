@@ -47,7 +47,7 @@ type Tunnel struct {
 // ClientConfig is a tunnel client configuration.
 type ClientConfig struct {
 	ServerAddr              string             `yaml:"server_addr"`
-	ServerHeartbeatInterval time.Duration      `yaml:"server_heartbeart_interval"`
+	ServerHeartbeatInterval time.Duration      `yaml:"-"`
 	TLSCrt                  string             `yaml:"tls_crt"`
 	TLSKey                  string             `yaml:"tls_key"`
 	RootCA                  string             `yaml:"root_ca"`
@@ -74,8 +74,32 @@ func loadClientConfigFromFile(file string) (*ClientConfig, error) {
 		},
 	}
 
-	if err = yaml.Unmarshal(buf, &c); err != nil {
+	decoded := struct {
+		Config          ClientConfig   `yaml:",inline"`
+		Heartbeat       *time.Duration `yaml:"server_heartbeat_interval"`
+		LegacyHeartbeat *time.Duration `yaml:"server_heartbeart_interval"`
+	}{Config: c}
+	if err = yaml.UnmarshalStrict(buf, &decoded); err != nil {
 		return nil, fmt.Errorf("failed to parse file %q: %s", file, err)
+	}
+	var fields yaml.MapSlice
+	if err = yaml.Unmarshal(buf, &fields); err != nil {
+		return nil, fmt.Errorf("failed to parse file %q: %s", file, err)
+	}
+	heartbeatSet := false
+	for _, field := range fields {
+		if field.Key == "server_heartbeat_interval" || field.Key == "server_heartbeart_interval" {
+			if heartbeatSet {
+				return nil, fmt.Errorf("specify server_heartbeat_interval only once, without its legacy alias")
+			}
+			heartbeatSet = true
+		}
+	}
+	c = decoded.Config
+	if decoded.Heartbeat != nil {
+		c.ServerHeartbeatInterval = *decoded.Heartbeat
+	} else if decoded.LegacyHeartbeat != nil {
+		c.ServerHeartbeatInterval = *decoded.LegacyHeartbeat
 	}
 
 	if c.ServerAddr == "" {

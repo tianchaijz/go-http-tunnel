@@ -146,7 +146,7 @@ func tlsConfig(opts *options) (*tls.Config, error) {
 			return nil, err
 		}
 		if ok := roots.AppendCertsFromPEM(rootPEM); !ok {
-			return nil, err
+			return nil, fmt.Errorf("root CA file %q contains no valid certificates", opts.rootCA)
 		}
 		clientAuth = tls.RequireAndVerifyClientCert
 	}

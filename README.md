@@ -157,6 +157,7 @@ looks like this
 Configuration options:
 
 * `server_addr`: server TCP address, i.e. `54.12.12.45:5223`
+* `server_heartbeat_interval`: expected server heartbeat interval, default `5s`. Set `0s` to disable the client heartbeat check.
 * `tls_crt`: path to client TLS certificate, *default:* `client.crt` *in the config file directory*
 * `tls_key`: path to client TLS certificate key, *default:* `client.key` *in the config file directory*
 * `root_ca`: path to trusted root certificate authority pool file, if empty any server certificate is accepted
@@ -171,6 +172,10 @@ Configuration options:
     * `multiplier`: interval multiplier if reconnect failed, *default:* `1.5`
     * `max_interval`: maximal time client would wait before redialing the server, *default:* `1m`
     * `max_time`: maximal time client would try to reconnect to the server if connection was lost, set `0` to never stop trying, *default:* `15m`
+
+Unknown configuration fields are rejected. The old misspelling
+`server_heartbeart_interval` remains accepted as an alias. Specify only one
+heartbeat key, once. IPv6 addresses must include brackets, such as `[::1]:5223`.
 
 ## How it works
 
