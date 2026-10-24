@@ -17,7 +17,7 @@ import (
 // TCPProxy forwards TCP streams.
 type TCPProxy struct {
 	// localAddr specifies default TCP address of the local server.
-	localAddr string
+	localAddr    string
 	localAddrMap map[string]string
 	// logger is the proxy logger.
 	logger log.Logger
