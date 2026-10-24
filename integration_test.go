@@ -341,11 +341,35 @@ func tlsConfig() *tls.Config {
 }
 
 func TestHTTPPublicCancellation(t *testing.T) {
+	for _, upload := range []bool{false, true} {
+		name := "GET"
+		if upload {
+			name = "unfinished_POST"
+		}
+		t.Run(name, func(t *testing.T) { testHTTPPublicCancellation(t, upload) })
+	}
+}
+
+func testHTTPPublicCancellation(t *testing.T, upload bool) {
 	arrived := make(chan struct{})
 	canceled := make(chan struct{})
 	release := make(chan struct{})
+	survivorArrived := make(chan struct{})
+	survivorRelease := make(chan struct{})
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/survivor" {
+			close(survivorArrived)
+			select {
+			case <-survivorRelease:
+				io.WriteString(w, "survived")
+			case <-r.Context().Done():
+			}
+			return
+		}
 		close(arrived)
+		if upload {
+			io.Copy(io.Discard, r.Body)
+		}
 		select {
 		case <-r.Context().Done():
 			close(canceled)
@@ -353,6 +377,7 @@ func TestHTTPPublicCancellation(t *testing.T) {
 		}
 	}))
 	defer backend.Close()
+	defer close(survivorRelease)
 	target, err := url.Parse(backend.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -393,11 +418,23 @@ func TestHTTPPublicCancellation(t *testing.T) {
 	front := httptest.NewServer(s)
 	defer func() {
 		close(release)
+		front.CloseClientConnections()
 		front.Close()
 	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, front.URL, nil)
+	method := http.MethodGet
+	var body io.Reader
+	var writer *io.PipeWriter
+	if upload {
+		method = http.MethodPost
+		var reader *io.PipeReader
+		reader, writer = io.Pipe()
+		body = reader
+		defer writer.Close()
+		go func() { writer.Write(make([]byte, 65536)) }()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, front.URL, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +452,34 @@ func TestHTTPPublicCancellation(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("backend request did not arrive")
 	}
+	survivorDone := make(chan error, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodGet, front.URL+"/survivor", nil)
+		if err != nil {
+			survivorDone <- err
+			return
+		}
+		req.Host = "cancel.test"
+		resp, err := front.Client().Do(req)
+		if err == nil {
+			var data []byte
+			data, err = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err == nil && string(data) != "survived" {
+				err = fmt.Errorf("surviving request body = %q", data)
+			}
+		}
+		survivorDone <- err
+	}()
+	select {
+	case <-survivorArrived:
+	case <-time.After(3 * time.Second):
+		t.Fatal("second backend request did not arrive")
+	}
 	cancel()
+	if writer != nil {
+		writer.CloseWithError(context.Canceled)
+	}
 	select {
 	case err := <-done:
 		if err == nil {
@@ -428,5 +492,18 @@ func TestHTTPPublicCancellation(t *testing.T) {
 	case <-canceled:
 	case <-time.After(3 * time.Second):
 		t.Error("backend request remained active after public HTTP cancellation")
+	}
+	select {
+	case survivorRelease <- struct{}{}:
+	case <-time.After(3 * time.Second):
+		t.Error("second backend request was canceled")
+	}
+	select {
+	case err := <-survivorDone:
+		if err != nil {
+			t.Errorf("second request failed after cancellation: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("second request did not complete")
 	}
 }
