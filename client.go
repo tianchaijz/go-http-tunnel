@@ -278,7 +278,9 @@ func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 				conn = tls.Client(conn, tlsConfig)
 			}
 			if err == nil {
-				err = conn.(*tls.Conn).HandshakeContext(ctx)
+				handshakeCtx, cancel := context.WithTimeout(ctx, DefaultTimeout)
+				err = conn.(*tls.Conn).HandshakeContext(handshakeCtx)
+				cancel()
 			}
 		}
 

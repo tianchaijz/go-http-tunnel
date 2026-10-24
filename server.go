@@ -235,6 +235,15 @@ func (s *Server) handleClient(conn net.Conn) {
 		goto reject
 	}
 
+	if err = conn.SetDeadline(time.Now().Add(DefaultTimeout)); err != nil {
+		logger.Log(
+			"level", 2,
+			"msg", "setting TLS handshake deadline failed",
+			"err", err,
+		)
+		goto reject
+	}
+
 	identifier, err = id.PeerID(tlsConn)
 	if err != nil {
 		logger.Log(
