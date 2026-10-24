@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -124,4 +125,46 @@ func TestRegistrationEmptyPortUsesOSAllocation(t *testing.T) {
 	if raw.RemoteAddr != "127.0.0.1:" {
 		t.Fatalf("registration changed input to %q", raw.RemoteAddr)
 	}
+}
+
+func TestRegistrationOccupiedHostRollsBackOnlyDraft(t *testing.T) {
+	s, owner := portTestServer(t, 30000)
+	if err := s.addTunnels(map[string]*proto.Tunnel{"web": {Protocol: proto.HTTP, Host: "occupied.test:80", Auth: "owner:secret"}}, owner); err != nil {
+		t.Fatal(err)
+	}
+	otherID := id.New([]byte("other"))
+	s.Subscribe(otherID)
+	other, err := s.connPool.AddConn(poolTestConn(t, nil, nil), otherID, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := &listenerPreparationGate{entered: make(chan struct{}), release: make(chan struct{})}
+	close(prepared.release)
+	s.logger = prepared
+	err = s.addTunnels(map[string]*proto.Tunnel{
+		"new":      {Protocol: proto.HTTP, Host: "new.test"},
+		"occupied": {Protocol: proto.HTTP, Host: "occupied.test:443"},
+		"tcp":      {Protocol: proto.TCP, RemoteAddr: "127.0.0.1:0"},
+	}, other)
+	if err == nil || !strings.Contains(err.Error(), "occupied") {
+		t.Fatalf("occupied registration = %v", err)
+	}
+	if got, auth, ok := s.Subscriber("occupied.test"); !ok || got != owner.identifier || auth == nil || auth.User != "owner" {
+		t.Fatalf("occupied route changed to %s, %#v, %v", got, auth, ok)
+	}
+	if _, _, ok := s.Subscriber("new.test"); ok {
+		t.Fatal("failed batch published a new route")
+	}
+	if rows := s.registry.dashboardSnapshot(); len(rows) != 1 || rows[0].Client != owner.identifier {
+		t.Fatalf("failed batch changed dashboard: %v", rows)
+	}
+	port := s.registry.portPool.Get()
+	if prepared.addr == nil || port != uint64(prepared.addr.(*net.TCPAddr).Port) {
+		t.Fatalf("failed draft returned port %d, prepared address %v", port, prepared.addr)
+	}
+	probe, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.FormatUint(port, 10)))
+	if err != nil {
+		t.Fatalf("failed draft retained its listener: %v", err)
+	}
+	probe.Close()
 }

@@ -13,7 +13,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -76,7 +75,7 @@ func NewServer(config *ServerConfig) (*Server, error) {
 	}
 
 	t := &http2.Transport{}
-	pool := newConnPool(t, s.disconnectedWithTag)
+	pool := newConnPool(t, s.registry)
 	t.ConnPool = pool
 	s.connPool = pool
 	s.httpClient = &http.Client{
@@ -104,38 +103,6 @@ func listener(config *ServerConfig) (net.Listener, error) {
 	return net.Listen("tcp", config.Addr)
 }
 
-func (s *Server) doDisconnect(identifier id.ID, i *RegistryItem) {
-	for _, l := range i.Listeners {
-		s.logger.Log(
-			"level", 2,
-			"action", "close listener",
-			"identifier", identifier,
-			"addr", l.Addr(),
-		)
-		l.Close()
-	}
-
-	for _, port := range i.Ports {
-		s.registry.portPool.Put(port)
-	}
-}
-
-func (s *Server) disconnectedWithTag(identifier id.ID, tag string) {
-	i := s.registry.clear(identifier, tag)
-	if i == nil {
-		return
-	}
-
-	s.logger.Log(
-		"level", 1,
-		"action", "disconnected",
-		"identifier", identifier,
-		"tag", tag,
-	)
-
-	s.doDisconnect(identifier, i)
-}
-
 // Start starts accepting connections form clients. For accepting http traffic
 // from end users server must be run as handler on http server.
 func (s *Server) Start() {
@@ -150,7 +117,7 @@ func (s *Server) Start() {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if strings.Contains(err.Error(), "use of closed network connection") {
+			if errors.Is(err, net.ErrClosed) {
 				s.logger.Log(
 					"level", 1,
 					"action", "control connection listener closed",
@@ -418,17 +385,7 @@ func (s *Server) notifyError(serverError error, session *connPair) {
 // Unsubscribe removes client from registry, disconnects client if already
 // connected and returns it's RegistryItem.
 func (s *Server) Unsubscribe(identifier id.ID) *RegistryItem {
-	s.connPool.mu.Lock()
-	session := s.connPool.conns[s.connPool.addr(identifier)]
-	if session != nil {
-		s.connPool.removeLocked(session)
-	}
-	i := s.registry.Unsubscribe(identifier)
-	s.connPool.mu.Unlock()
-	if session != nil {
-		session.conn.Close()
-	}
-	return i
+	return s.connPool.unsubscribe(identifier)
 }
 
 // Ping measures the RTT response time.
@@ -442,7 +399,7 @@ func (s *Server) listen(l Listener, identifier id.ID) {
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			if strings.Contains(err.Error(), "use of closed network connection") {
+			if errors.Is(err, net.ErrClosed) {
 				s.logger.Log(
 					"level", 2,
 					"action", "listener closed",

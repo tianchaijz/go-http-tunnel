@@ -97,19 +97,13 @@ var voidRegistryItem = &RegistryItem{}
 // Subscribe allows to connect client with a given identifier.
 func (r *registry) Subscribe(identifier id.ID) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if _, ok := r.items[identifier]; ok {
+		r.mu.Unlock()
 		return
 	}
-
-	r.logger.Log(
-		"level", 1,
-		"action", "subscribe",
-		"identifier", identifier,
-	)
-
 	r.items[identifier] = voidRegistryItem
+	r.mu.Unlock()
+	r.logger.Log("level", 1, "action", "subscribe", "identifier", identifier)
 }
 
 // IsSubscribed returns true if client is subscribed.
@@ -133,43 +127,18 @@ func (r *registry) Subscriber(hostPort string) (id.ID, *Auth, bool) {
 	return h.identifier, h.auth, ok
 }
 
-// Unsubscribe removes client from registry and returns it's RegistryItem.
-func (r *registry) Unsubscribe(identifier id.ID) *RegistryItem {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	i, ok := r.items[identifier]
-	if !ok {
-		return nil
-	}
-
-	r.logger.Log(
-		"level", 1,
-		"action", "unsubscribe",
-		"identifier", identifier,
-	)
-
-	if i.Hosts != nil {
-		for _, h := range i.Hosts {
-			delete(r.hosts, canonicalHost(h.Host))
+func (r *registry) unsubscribeLocked(identifier id.ID) *RegistryItem {
+	i := r.items[identifier]
+	if i != nil {
+		for _, key := range i.hostKeys {
+			delete(r.hosts, key)
 		}
+		delete(r.items, identifier)
 	}
-
-	delete(r.items, identifier)
-
 	return i
 }
 
-func (r *registry) set(i *RegistryItem, identifier id.ID) error {
-	r.logger.Log(
-		"level", 2,
-		"action", "set registry item",
-		"identifier", identifier,
-	)
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+func (r *registry) publishLocked(i *RegistryItem, identifier id.ID) error {
 	j, ok := r.items[identifier]
 	if !ok {
 		return errClientNotSubscribed
@@ -177,54 +146,39 @@ func (r *registry) set(i *RegistryItem, identifier id.ID) error {
 	if j != voidRegistryItem {
 		return fmt.Errorf("attempt to overwrite registry item")
 	}
-
-	if i.Hosts != nil {
-		for _, h := range i.Hosts {
-			if h.Auth != nil && h.Auth.User == "" {
-				return fmt.Errorf("missing auth user")
-			}
-			if _, ok := r.hosts[canonicalHost(h.Host)]; ok {
-				return fmt.Errorf("host %q is occupied", h.Host)
-			}
-		}
-
-		for _, h := range i.Hosts {
-			r.hosts[canonicalHost(h.Host)] = &hostInfo{
-				identifier: identifier,
-				auth:       h.Auth,
-			}
+	for _, key := range i.hostKeys {
+		if _, ok := r.hosts[key]; ok {
+			return fmt.Errorf("host %q is occupied", key)
 		}
 	}
-
+	for n, key := range i.hostKeys {
+		r.hosts[key] = &hostInfo{identifier: identifier, auth: i.Hosts[n].Auth}
+	}
 	r.items[identifier] = i
-
 	return nil
 }
 
-func (r *registry) clear(identifier id.ID, tag string) *RegistryItem {
-	r.logger.Log(
-		"level", 2,
-		"action", "clear registry item",
-		"identifier", identifier,
-	)
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	i, ok := r.items[identifier]
-	if !ok || i == voidRegistryItem || (tag != "" && i.Tag != tag) {
-		return nil
+func (r *registry) detachLocked(identifier id.ID, expected *RegistryItem) {
+	if r.items[identifier] != expected {
+		return
 	}
-
-	if i.Hosts != nil {
-		for _, h := range i.Hosts {
-			delete(r.hosts, canonicalHost(h.Host))
-		}
+	for _, key := range expected.hostKeys {
+		delete(r.hosts, key)
 	}
-
 	r.items[identifier] = voidRegistryItem
+}
 
-	return i
+func (r *registry) release(identifier id.ID, item *RegistryItem) {
+	if item == nil {
+		return
+	}
+	for _, l := range item.Listeners {
+		r.logger.Log("level", 2, "action", "close listener", "identifier", identifier, "addr", l.Addr())
+		l.Close()
+	}
+	for _, port := range item.Ports {
+		r.portPool.Put(port)
+	}
 }
 
 func trimPort(hostPort string) (host string) {

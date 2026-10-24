@@ -186,7 +186,7 @@ func TestServerRemovedHandshakeCannotPublishTunnels(t *testing.T) {
 		}
 	})
 	s := &Server{registry: newRegistry(log.NewNopLogger(), 30000), logger: gate}
-	s.connPool = newConnPool(new(http2.Transport), s.disconnectedWithTag)
+	s.connPool = newConnPool(new(http2.Transport), s.registry)
 	defer s.connPool.Close()
 	identifier := id.New([]byte("same"))
 	s.Subscribe(identifier)
@@ -224,15 +224,22 @@ func TestServerRemovedHandshakeCannotPublishTunnels(t *testing.T) {
 		t.Fatalf("removed handshake left prepared listener open: %v", err)
 	}
 	listener.Close()
+	allocatedPort := uint64(gate.addr.(*net.TCPAddr).Port)
+	if got := s.registry.portPool.Get(); got != allocatedPort {
+		t.Fatalf("stale draft returned port %d, want %d", got, allocatedPort)
+	}
+	if got := s.registry.portPool.Get(); got == allocatedPort {
+		t.Fatal("stale draft returned its port twice")
+	}
 }
 
 func TestServerReconnectReusesListenerPort(t *testing.T) {
 	s := &Server{registry: newRegistry(nil, 30000), logger: log.NewNopLogger()}
-	s.connPool = newConnPool(new(http2.Transport), s.disconnectedWithTag)
+	s.connPool = newConnPool(new(http2.Transport), s.registry)
 	defer s.connPool.Close()
 	identifier := id.New([]byte("same"))
 	s.Subscribe(identifier)
-	addr := "127.0.0.1:0"
+	addr := "127.0.0.1:"
 	for _, tag := range []string{"old", "replacement"} {
 		session, err := s.connPool.AddConn(poolTestConn(t, nil, nil), identifier, tag)
 		if err != nil {

@@ -86,7 +86,7 @@ func awaitPoolSignal(t *testing.T, signal <-chan struct{}, message string) {
 func TestConnPoolProbeAllowsOtherClients(t *testing.T) {
 	for _, operation := range []string{"Ping", "AddConn"} {
 		t.Run(operation, func(t *testing.T) {
-			p := newConnPool(new(http2.Transport), nil)
+			p := newConnPool(new(http2.Transport), newRegistry(nil, 0))
 			slowID, fastID := id.New([]byte("slow")), id.New([]byte("fast"))
 			var gate *poolWriteGate
 			slow := poolTestConn(t, nil, func(conn net.Conn) net.Conn {
@@ -147,7 +147,7 @@ func TestConnPoolProbeAllowsOtherClients(t *testing.T) {
 }
 
 func TestConnPoolAddConnPrefaceAllowsOtherClients(t *testing.T) {
-	p := newConnPool(new(http2.Transport), nil)
+	p := newConnPool(new(http2.Transport), newRegistry(nil, 0))
 	fastID := id.New([]byte("fast"))
 	if _, err := p.AddConn(poolTestConn(t, nil, nil), fastID, "test"); err != nil {
 		t.Fatal(err)
@@ -183,17 +183,18 @@ func TestConnPoolAddConnPrefaceAllowsOtherClients(t *testing.T) {
 }
 
 func TestConnPoolStaleProbePreservesReplacement(t *testing.T) {
-	var frees int
-	p := newConnPool(new(http2.Transport), func(id.ID, string) { frees++ })
+	p := newConnPool(new(http2.Transport), newRegistry(nil, 0))
 	identifier := id.New([]byte("same"))
 	var gate *poolWriteGate
 	old := poolTestConn(t, func(conn net.Conn) net.Conn {
 		gate = gatePoolWrites(t, conn, poolPingFrame(false))
 		return gate
 	}, nil)
-	if _, err := p.AddConn(old, identifier, "test"); err != nil {
+	oldSession, err := p.AddConn(old, identifier, "test")
+	if err != nil {
 		t.Fatal(err)
 	}
+	oldListener := poolTestRegistration(t, p, oldSession)
 	var candidateGate *poolWriteGate
 	candidate := poolTestConn(t, func(conn net.Conn) net.Conn {
 		candidateGate = gatePoolWrites(t, conn, func(b []byte) bool { return bytes.HasPrefix(b, []byte(http2.ClientPreface)) })
@@ -205,7 +206,7 @@ func TestConnPoolStaleProbePreservesReplacement(t *testing.T) {
 	replaced := make(chan error, 1)
 	newer := poolTestConn(t, nil, nil)
 	go func() {
-		p.DeleteConn(identifier)
+		p.remove(oldSession)
 		_, err := p.AddConn(newer, identifier, "test")
 		replaced <- err
 	}()
@@ -231,13 +232,13 @@ func TestConnPoolStaleProbePreservesReplacement(t *testing.T) {
 	if p.conns[p.addr(identifier)].conn != newer {
 		t.Error("stale probe replaced the newer connection")
 	}
-	if frees != 1 {
-		t.Errorf("cleanup callbacks = %d, want only the deleted connection's callback", frees)
+	if got := oldListener.closes.Load(); got != 1 {
+		t.Errorf("old listener closed %d times, want 1", got)
 	}
 }
 
 func TestConnPoolConcurrentAddConnKeepsWinner(t *testing.T) {
-	p := newConnPool(new(http2.Transport), nil)
+	p := newConnPool(new(http2.Transport), newRegistry(nil, 0))
 	identifier := id.New([]byte("same"))
 	var gate *poolWriteGate
 	candidate := poolTestConn(t, func(conn net.Conn) net.Conn {
@@ -284,7 +285,7 @@ func (p *poolDeathNotice) MarkDead(cc *http2.ClientConn) {
 
 func TestConnPoolAddConnRejectsClosedConnection(t *testing.T) {
 	transport := &http2.Transport{IdleConnTimeout: 10 * time.Millisecond}
-	p := newConnPool(transport, nil)
+	p := newConnPool(transport, newRegistry(nil, 0))
 	dead := make(chan struct{})
 	transport.ConnPool = &poolDeathNotice{connPool: p, dead: dead}
 	client, peer := net.Pipe()
@@ -314,15 +315,15 @@ func TestConnPoolAddConnRejectsClosedConnection(t *testing.T) {
 }
 
 func TestConnPoolStaleRemovalPreservesReplacement(t *testing.T) {
-	var freed []string
-	p := newConnPool(new(http2.Transport), func(_ id.ID, tag string) { freed = append(freed, tag) })
+	p := newConnPool(new(http2.Transport), newRegistry(nil, 0))
 	defer p.Close()
 	identifier := id.New([]byte("same"))
 	old, err := p.AddConn(poolTestConn(t, nil, nil), identifier, "old")
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.DeleteConn(identifier)
+	oldListener := poolTestRegistration(t, p, old)
+	p.remove(old)
 	awaitPoolSignal(t, old.ctx.Done(), "deleted session was not canceled")
 	current, err := p.AddConn(poolTestConn(t, nil, nil), identifier, "current")
 	if err != nil {
@@ -336,13 +337,13 @@ func TestConnPoolStaleRemovalPreservesReplacement(t *testing.T) {
 	if current.ctx.Err() != nil {
 		t.Fatal("stale removal canceled replacement")
 	}
-	if len(freed) != 1 || freed[0] != "old" {
-		t.Fatalf("cleanup callbacks = %v, want [old]", freed)
+	if got := oldListener.closes.Load(); got != 1 {
+		t.Fatalf("old listener closed %d times, want 1", got)
 	}
 }
 
 func TestConnPoolCloseRejectsPendingAdmission(t *testing.T) {
-	p := newConnPool(new(http2.Transport), nil)
+	p := newConnPool(new(http2.Transport), newRegistry(nil, 0))
 	current, err := p.AddConn(poolTestConn(t, nil, nil), id.New([]byte("current")), "current")
 	if err != nil {
 		t.Fatal(err)
@@ -383,7 +384,7 @@ func (c *poolCloseGate) Close() error {
 }
 
 func TestConnPoolCloseConnectionAllowsOtherClients(t *testing.T) {
-	p := newConnPool(new(http2.Transport), nil)
+	p := newConnPool(new(http2.Transport), newRegistry(nil, 0))
 	var gate *poolCloseGate
 	conn := poolTestConn(t, func(conn net.Conn) net.Conn {
 		gate = &poolCloseGate{Conn: conn, entered: make(chan struct{}), release: make(chan struct{})}
@@ -397,14 +398,15 @@ func TestConnPoolCloseConnectionAllowsOtherClients(t *testing.T) {
 		}
 	})
 	oldID, otherID := id.New([]byte("old")), id.New([]byte("other"))
-	if _, err := p.AddConn(conn, oldID, "old"); err != nil {
+	old, err := p.AddConn(conn, oldID, "old")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := p.AddConn(poolTestConn(t, nil, nil), otherID, "other"); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
-	go func() { defer close(done); p.DeleteConn(oldID) }()
+	go func() { defer close(done); p.remove(old) }()
 	t.Cleanup(func() { close(gate.release); <-done })
 	awaitPoolSignal(t, gate.entered, "removed connection was not closed")
 	lookup := make(chan error, 1)
@@ -426,7 +428,7 @@ func TestConnPoolCloseConnectionAllowsOtherClients(t *testing.T) {
 }
 
 func TestConnPoolGetClientConnReservesRequest(t *testing.T) {
-	p := newConnPool(new(http2.Transport), nil)
+	p := newConnPool(new(http2.Transport), newRegistry(nil, 0))
 	defer p.Close()
 	identifier := id.New([]byte("reserved"))
 	if _, err := p.AddConn(poolTestConn(t, nil, nil), identifier, "test"); err != nil {

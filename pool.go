@@ -18,27 +18,39 @@ import (
 )
 
 type connPair struct {
-	conn       net.Conn
-	clientConn *http2.ClientConn
-	identifier id.ID
-	tag        string
-	ctx        context.Context
-	cancel     context.CancelFunc
+	conn         net.Conn
+	clientConn   *http2.ClientConn
+	identifier   id.ID
+	tag          string
+	ctx          context.Context
+	cancel       context.CancelFunc
+	registration *RegistryItem
 }
 
 type connPool struct {
-	t      *http2.Transport
-	conns  map[string]*connPair // key is host:port
-	free   func(identifier id.ID, tag string)
-	closed bool
-	mu     sync.RWMutex
+	t        *http2.Transport
+	conns    map[string]*connPair // key is host:port
+	registry *registry
+	retiring map[id.ID]chan struct{}
+	closed   bool
+	done     chan struct{}
+	mu       sync.RWMutex
 }
 
-func newConnPool(t *http2.Transport, f func(identifier id.ID, tag string)) *connPool {
+type detachedSession struct {
+	session    *connPair
+	item       *RegistryItem
+	identifier id.ID
+	retired    chan struct{}
+}
+
+func newConnPool(t *http2.Transport, r *registry) *connPool {
 	return &connPool{
-		t:     t,
-		free:  f,
-		conns: make(map[string]*connPair),
+		t:        t,
+		registry: r,
+		conns:    make(map[string]*connPair),
+		retiring: make(map[id.ID]chan struct{}),
+		done:     make(chan struct{}),
 	}
 }
 
@@ -59,29 +71,37 @@ func (p *connPool) GetClientConn(req *http.Request, addr string) (*http2.ClientC
 
 func (p *connPool) MarkDead(c *http2.ClientConn) {
 	p.mu.Lock()
+	var detached detachedSession
 	for _, cp := range p.conns {
 		if cp.clientConn == c {
-			p.removeLocked(cp)
-			p.mu.Unlock()
-			cp.conn.Close()
-			return
+			detached = p.detachLocked(cp)
+			break
 		}
 	}
 	p.mu.Unlock()
+	p.release(detached)
 }
 
 func (p *connPool) AddConn(conn net.Conn, identifier id.ID, tag string) (*connPair, error) {
 	addr := p.addr(identifier)
-
 	for {
 		p.mu.RLock()
-		cp, ok := p.conns[addr]
+		cp := p.conns[addr]
 		closed := p.closed
+		retiring := p.retiring[identifier]
 		p.mu.RUnlock()
 		if closed {
 			return nil, errClientNotConnected
 		}
-		if !ok {
+		if retiring != nil {
+			select {
+			case <-retiring:
+			case <-p.done:
+				return nil, errClientNotConnected
+			}
+			continue
+		}
+		if cp == nil {
 			break
 		}
 
@@ -95,90 +115,167 @@ func (p *connPool) AddConn(conn net.Conn, identifier id.ID, tag string) (*connPa
 			p.mu.Unlock()
 			return nil, errClientAlreadyConnected
 		}
-		p.removeLocked(cp)
+		detached := p.detachLocked(cp)
 		p.mu.Unlock()
-		cp.conn.Close()
-		break
+		p.release(detached)
 	}
 
 	c, err := p.t.NewClientConn(conn)
 	if err != nil {
 		return nil, err
 	}
-	p.mu.Lock()
-	switch {
-	case p.closed:
-		err = errClientNotConnected
-	case p.conns[addr] != nil:
-		err = errClientAlreadyConnected
-	case c.State().Closed || !c.CanTakeNewRequest():
-		err = errClientNotConnected
-	}
-	if err != nil {
+	for {
+		p.mu.Lock()
+		if retiring := p.retiring[identifier]; !p.closed && retiring != nil {
+			p.mu.Unlock()
+			select {
+			case <-retiring:
+			case <-p.done:
+			}
+			continue
+		}
+		switch {
+		case p.closed:
+			err = errClientNotConnected
+		case p.conns[addr] != nil:
+			err = errClientAlreadyConnected
+		case c.State().Closed || !c.CanTakeNewRequest():
+			err = errClientNotConnected
+		}
+		if err != nil {
+			p.mu.Unlock()
+			conn.Close()
+			return nil, err
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cp := &connPair{
+			conn:       conn,
+			clientConn: c,
+			identifier: identifier,
+			tag:        tag,
+			ctx:        ctx,
+			cancel:     cancel,
+		}
+		p.conns[addr] = cp
 		p.mu.Unlock()
-		conn.Close()
-		return nil, err
+		return cp, nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cp := &connPair{
-		conn:       conn,
-		clientConn: c,
-		identifier: identifier,
-		tag:        tag,
-		ctx:        ctx,
-		cancel:     cancel,
-	}
-	p.conns[addr] = cp
-	p.mu.Unlock()
-
-	return cp, nil
 }
 
-func (p *connPool) DeleteConn(identifier id.ID) {
+func (p *connPool) commit(cp *connPair, item *RegistryItem) error {
 	p.mu.Lock()
-	cp := p.conns[p.addr(identifier)]
-	if cp != nil {
-		p.removeLocked(cp)
+	defer p.mu.Unlock()
+	if p.conns[p.addr(cp.identifier)] != cp {
+		return errClientNotConnected
 	}
-	p.mu.Unlock()
-	if cp != nil {
-		cp.conn.Close()
+	if err := cp.ctx.Err(); err != nil {
+		return err
 	}
+	p.registry.mu.Lock()
+	defer p.registry.mu.Unlock()
+	if err := p.registry.publishLocked(item, cp.identifier); err != nil {
+		return err
+	}
+	cp.registration = item
+	return nil
 }
 
 func (p *connPool) remove(cp *connPair) {
 	p.mu.Lock()
-	removed := p.removeLocked(cp)
+	detached := p.detachLocked(cp)
 	p.mu.Unlock()
-	if removed {
-		cp.conn.Close()
-	}
+	p.release(detached)
 }
 
-func (p *connPool) removeLocked(cp *connPair) bool {
+func (p *connPool) detachLocked(cp *connPair) detachedSession {
 	addr := p.addr(cp.identifier)
 	if p.conns[addr] != cp {
-		return false
+		return detachedSession{}
 	}
 	delete(p.conns, addr)
 	cp.cancel()
-	if p.free != nil {
-		p.free(cp.identifier, cp.tag)
+	item := cp.registration
+	cp.registration = nil
+	if item != nil {
+		p.registry.mu.Lock()
+		p.registry.detachLocked(cp.identifier, item)
+		p.registry.mu.Unlock()
 	}
-	return true
+	retired := make(chan struct{})
+	p.retiring[cp.identifier] = retired
+	return detachedSession{session: cp, item: item, identifier: cp.identifier, retired: retired}
+}
+
+func (p *connPool) release(detached detachedSession) {
+	if detached.retired == nil {
+		return
+	}
+	if detached.session != nil {
+		detached.session.conn.Close()
+	}
+	if detached.item != nil {
+		p.registry.logger.Log("level", 1, "action", "disconnected", "identifier", detached.identifier, "tag", detached.item.Tag)
+	}
+	p.registry.release(detached.identifier, detached.item)
+	p.mu.Lock()
+	if p.retiring[detached.identifier] == detached.retired {
+		delete(p.retiring, detached.identifier)
+		close(detached.retired)
+	}
+	p.mu.Unlock()
+}
+
+func (p *connPool) unsubscribe(identifier id.ID) *RegistryItem {
+	p.mu.Lock()
+	retiring := p.retiring[identifier]
+	var detached detachedSession
+	if cp := p.conns[p.addr(identifier)]; cp != nil {
+		detached = p.detachLocked(cp)
+	}
+	p.registry.mu.Lock()
+	item := p.registry.unsubscribeLocked(identifier)
+	p.registry.mu.Unlock()
+	if detached.item != nil {
+		item = detached.item
+	} else if item != nil && item != voidRegistryItem {
+		detached.item = item
+		if detached.retired == nil {
+			detached.identifier = identifier
+			detached.retired = make(chan struct{})
+			p.retiring[identifier] = detached.retired
+		}
+	}
+	p.mu.Unlock()
+	p.release(detached)
+	if retiring != nil {
+		<-retiring
+	}
+	if item != nil {
+		p.registry.logger.Log("level", 1, "action", "unsubscribe", "identifier", identifier)
+	}
+	return item
 }
 
 func (p *connPool) Close() {
 	p.mu.Lock()
-	p.closed = true
-	conns := make([]*connPair, 0, len(p.conns))
+	if !p.closed {
+		p.closed = true
+		close(p.done)
+	}
+	retiring := make([]chan struct{}, 0, len(p.retiring))
+	for _, done := range p.retiring {
+		retiring = append(retiring, done)
+	}
+	detached := make([]detachedSession, 0, len(p.conns))
 	for _, cp := range p.conns {
-		p.removeLocked(cp)
-		conns = append(conns, cp)
+		detached = append(detached, p.detachLocked(cp))
 	}
 	p.mu.Unlock()
-	for _, cp := range conns {
-		cp.conn.Close()
+	for _, session := range detached {
+		p.release(session)
+	}
+	for _, done := range retiring {
+		<-done
 	}
 }
 

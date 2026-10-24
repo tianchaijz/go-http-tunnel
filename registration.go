@@ -77,14 +77,16 @@ func validateRegistration(tunnels map[string]*proto.Tunnel) (registrationPlan, e
 			spec := listenerSpec{name: name, network: t.Protocol, address: t.RemoteAddr}
 			if t.Protocol != proto.UNIX {
 				host, port, err := net.SplitHostPort(t.RemoteAddr)
-				if err != nil || port == "" {
+				if err != nil {
 					return plan, fmt.Errorf("invalid remote address for tunnel %s: %q", name, t.RemoteAddr)
 				}
-				if _, err := net.LookupPort(t.Protocol, port); err != nil {
-					return plan, fmt.Errorf("invalid port for tunnel %s: %w", name, err)
+				if port != "" {
+					if _, err := net.LookupPort(t.Protocol, port); err != nil {
+						return plan, fmt.Errorf("invalid port for tunnel %s: %w", name, err)
+					}
 				}
 				spec.host = host
-				spec.dynamic = strings.Trim(port, "0") == ""
+				spec.dynamic = port != "" && strings.Trim(port, "0") == ""
 			}
 			plan.listeners = append(plan.listeners, spec)
 		default:
@@ -98,7 +100,7 @@ func (s *Server) prepareRegistration(ctx context.Context, identifier id.ID, tag 
 	i := &RegistryItem{Tag: tag}
 	defer func() {
 		if err != nil {
-			s.doDisconnect(identifier, i)
+			s.registry.release(identifier, i)
 		}
 	}()
 	if err := ctx.Err(); err != nil {
@@ -155,17 +157,9 @@ func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, session *connPair)
 	if err != nil {
 		return err
 	}
-	s.connPool.mu.Lock()
-	if s.connPool.conns[s.connPool.addr(session.identifier)] != session {
-		err = errClientNotConnected
-	} else if session.ctx.Err() != nil {
-		err = session.ctx.Err()
-	} else {
-		err = s.set(i, session.identifier)
-	}
-	s.connPool.mu.Unlock()
+	err = s.connPool.commit(session, i)
 	if err != nil {
-		s.doDisconnect(session.identifier, i)
+		s.registry.release(session.identifier, i)
 		return err
 	}
 	for _, l := range i.Listeners {

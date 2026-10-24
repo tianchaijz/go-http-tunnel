@@ -79,11 +79,11 @@ func TestDashboardRegistrationLifecycle(t *testing.T) {
 	if !reflect.DeepEqual(rows, s.registry.dashboardSnapshot()) {
 		t.Fatal("unstable ordering")
 	}
-	s.disconnectedWithTag(session.identifier, "stale")
+	s.connPool.remove(&connPair{identifier: session.identifier, tag: "stale"})
 	if len(s.registry.dashboardSnapshot()) != 4 {
 		t.Fatal("stale disconnect removed registrations")
 	}
-	s.disconnectedWithTag(session.identifier, session.tag)
+	s.connPool.remove(session)
 	if len(s.registry.dashboardSnapshot()) != 0 {
 		t.Fatal("disconnect retained registrations")
 	}
@@ -183,7 +183,12 @@ func TestDashboardConcurrentSnapshots(t *testing.T) {
 		if err := s.addTunnels(map[string]*proto.Tunnel{"web": {Protocol: proto.HTTP, Host: "app.example"}}, session); err != nil {
 			t.Fatal(err)
 		}
-		s.disconnectedWithTag(session.identifier, session.tag)
+		s.connPool.remove(session)
+		var err error
+		session, err = s.connPool.AddConn(poolTestConn(t, nil, nil), session.identifier, "next")
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	wg.Wait()
 }

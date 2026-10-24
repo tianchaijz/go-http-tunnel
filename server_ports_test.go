@@ -85,7 +85,11 @@ func TestServerDynamicPortRetryAndRollbackReuse(t *testing.T) {
 		t.Skip("no port available above the occupied port")
 	}
 	s, session := portTestServer(t, uint64(port-1))
-	s.registry.Unsubscribe(session.identifier)
+	s.Unsubscribe(session.identifier)
+	session, err = s.connPool.AddConn(poolTestConn(t, nil, nil), session.identifier, "unsubscribed")
+	if err != nil {
+		t.Fatal(err)
+	}
 	tunnel := &proto.Tunnel{Protocol: proto.TCP, RemoteAddr: "127.0.0.1:0"}
 	if err := s.addTunnels(map[string]*proto.Tunnel{"tcp": tunnel}, session); err != errClientNotSubscribed {
 		t.Fatalf("unsubscribed setup = %v, want client not subscribed", err)

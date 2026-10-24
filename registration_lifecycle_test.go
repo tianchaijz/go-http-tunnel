@@ -2,7 +2,9 @@ package tunnel
 
 import (
 	"bytes"
+	"context"
 	"net"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -56,9 +58,13 @@ func TestUnsubscribeReturnsOriginalRegistration(t *testing.T) {
 				s.connPool.remove(session)
 			}
 			original := s.registry.items[session.identifier]
+			metadata := append([]dashboardTunnel(nil), original.dashboard...)
 			removed := s.Unsubscribe(session.identifier)
 			if removed != original {
 				t.Fatalf("Unsubscribe returned %#v, want original %#v", removed, original)
+			}
+			if !reflect.DeepEqual(removed.dashboard, metadata) {
+				t.Fatalf("unsubscribe changed dashboard metadata: %v", removed.dashboard)
 			}
 			if s.IsSubscribed(session.identifier) {
 				t.Fatal("unsubscribe retained subscription")
@@ -184,6 +190,8 @@ func TestStopWaitsForExistingRetirementAndWakesAdmission(t *testing.T) {
 	}()
 	stopped := make(chan struct{})
 	go func() { s.Stop(); close(stopped) }()
+	unsubscribed := make(chan struct{})
+	go func() { s.Unsubscribe(old.identifier); close(unsubscribed) }()
 	select {
 	case err := <-admitted:
 		if err != errClientNotConnected {
@@ -197,9 +205,15 @@ func TestStopWaitsForExistingRetirementAndWakesAdmission(t *testing.T) {
 		t.Error("Stop returned before listener cleanup")
 	default:
 	}
+	select {
+	case <-unsubscribed:
+		t.Error("concurrent Unsubscribe returned before listener cleanup")
+	default:
+	}
 	close(gate.release)
 	awaitPoolSignal(t, removed, "old cleanup did not finish")
 	awaitPoolSignal(t, stopped, "Stop did not finish after cleanup")
+	awaitPoolSignal(t, unsubscribed, "concurrent Unsubscribe did not finish after cleanup")
 	if got := gate.closes.Load(); got != 1 {
 		t.Fatalf("listener closed %d times", got)
 	}
@@ -260,18 +274,81 @@ func TestAdmissionRechecksRetirementAfterTransportSetup(t *testing.T) {
 	go func() { s.connPool.remove(old); close(removed) }()
 	awaitPoolSignal(t, gate.entered, "old listener was not closed")
 	close(preface.release)
+	var current *connPair
 	select {
-	case <-added:
+	case current = <-added:
 		t.Error("pending transport admitted before listener cleanup")
 	case <-time.After(50 * time.Millisecond):
 	}
 	close(gate.release)
 	awaitPoolSignal(t, removed, "old cleanup did not finish")
-	current := <-added
+	if current == nil {
+		current = <-added
+	}
 	if err := <-addErr; err != nil {
 		t.Fatal(err)
 	}
 	if err := s.addTunnels(map[string]*proto.Tunnel{"tcp": {Protocol: proto.TCP, RemoteAddr: gate.Addr().String()}}, current); err != nil {
 		t.Fatalf("pending admission could not reuse retired listener port: %v", err)
+	}
+}
+
+func poolTestRegistration(t *testing.T, p *connPool, cp *connPair) *retirementListener {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	item := &RegistryItem{Tag: cp.tag, Listeners: []Listener{{Listener: listener, TunnelName: "test"}}}
+	gate := gateRegistrationListener(t, item)
+	close(gate.release)
+	p.registry.Subscribe(cp.identifier)
+	if err := p.commit(cp, item); err != nil {
+		t.Fatal(err)
+	}
+	return gate
+}
+
+type lifecycleLockProbe struct {
+	pool       *connPool
+	registry   *registry
+	violations atomic.Int32
+}
+
+func (l *lifecycleLockProbe) Log(...interface{}) error {
+	if l.pool.mu.TryLock() {
+		l.pool.mu.Unlock()
+	} else {
+		l.violations.Add(1)
+	}
+	if l.registry.mu.TryLock() {
+		l.registry.mu.Unlock()
+	} else {
+		l.violations.Add(1)
+	}
+	return nil
+}
+
+func TestRegistrationLifecycleLogsOutsideLocks(t *testing.T) {
+	probe := &lifecycleLockProbe{}
+	r := newRegistry(probe, 30000)
+	p := newConnPool(nil, r)
+	probe.pool, probe.registry = p, r
+	s := &Server{registry: r, connPool: p, logger: probe}
+	client, peer := net.Pipe()
+	defer peer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cp := &connPair{conn: client, identifier: id.New([]byte("logging")), tag: "current", ctx: ctx, cancel: cancel}
+	p.conns[p.addr(cp.identifier)] = cp
+	defer p.Close()
+	s.Subscribe(cp.identifier)
+	if err := s.addTunnels(map[string]*proto.Tunnel{"web": {Protocol: proto.HTTP, Host: "logging.test"}}, cp); err != nil {
+		t.Fatal(err)
+	}
+	s.Unsubscribe(cp.identifier)
+	if got := probe.violations.Load(); got != 0 {
+		t.Fatalf("logging ran under lifecycle locks %d times", got)
 	}
 }
