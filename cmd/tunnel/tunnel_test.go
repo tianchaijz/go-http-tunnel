@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -67,30 +68,30 @@ tunnels:
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestTunnelMainProcess$", "--",
 				"-config", config, "-log-level", strconv.Itoa(level), "start-all")
 			cmd.Env = append(os.Environ(), "TUNNEL_TEST_MAIN=1")
-			outputFile, err := os.CreateTemp(t.TempDir(), "output")
+			outputReader, err := cmd.StdoutPipe()
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer outputFile.Close()
-			cmd.Stdout, cmd.Stderr = outputFile, outputFile
+			cmd.Stderr = cmd.Stdout
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
-			var output []byte
-			for ctx.Err() == nil {
-				output, err = os.ReadFile(outputFile.Name())
-				if err != nil || strings.Contains(string(output), "dial failed") {
+			var output strings.Builder
+			scanner := bufio.NewScanner(outputReader)
+			for scanner.Scan() {
+				line := scanner.Text()
+				output.WriteString(line + "\n")
+				if strings.Contains(line, "dial failed") {
 					break
 				}
-				time.Sleep(10 * time.Millisecond)
 			}
 			cmd.Process.Kill()
 			cmd.Wait()
-			if err != nil || !strings.Contains(string(output), "dial failed") {
-				t.Fatalf("client did not attempt a connection: err=%v output=%s", err, output)
+			if scanner.Err() != nil || !strings.Contains(output.String(), "dial failed") {
+				t.Fatalf("client did not attempt a connection: err=%v output=%s", scanner.Err(), output.String())
 			}
 			for _, secret := range []string{"credential-user-marker", "credential-password-marker"} {
-				if strings.Contains(string(output), secret) {
+				if strings.Contains(output.String(), secret) {
 					t.Errorf("client output contains credential %q", secret)
 				}
 			}

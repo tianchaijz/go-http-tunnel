@@ -14,8 +14,6 @@ import (
 	"os"
 	"sort"
 
-	"gopkg.in/yaml.v2"
-
 	"github.com/cenkalti/backoff"
 	"github.com/mmatczuk/go-http-tunnel"
 	"github.com/mmatczuk/go-http-tunnel/id"
@@ -88,12 +86,6 @@ func main() {
 	if err != nil {
 		fatal("failed to configure tls: %s", err)
 	}
-
-	b, err := yaml.Marshal(config)
-	if err != nil {
-		fatal("failed to dump config: %s", err)
-	}
-	logger.Log("config", string(b))
 
 	client, err := tunnel.NewClient(&tunnel.ClientConfig{
 		ServerAddr:              config.ServerAddr,
