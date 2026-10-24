@@ -379,7 +379,7 @@ func (c *Client) serveHTTP(session *clientSession, w http.ResponseWriter, r *htt
 			"msg", "unknown action",
 			"ctrlMsg", msg,
 		)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("unknown action %q", msg.Action), http.StatusBadRequest)
 	}
 	c.logger.Log(
 		"level", 2,
