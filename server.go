@@ -14,7 +14,9 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -433,23 +435,33 @@ func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, session *connPair)
 
 	var (
 		l          net.Listener
+		lc         net.ListenConfig
 		err        error
 		tunnelName string
 	)
 
 	for name, t := range tunnels {
+		if err = session.ctx.Err(); err != nil {
+			goto rollback
+		}
 		switch t.Protocol {
 		case proto.HTTP:
 			i.Hosts = append(i.Hosts, &HostAuth{t.Host, NewAuth(t.Auth)})
 		case proto.TCP, proto.TCP4, proto.TCP6, proto.UNIX:
-			idx := strings.Index(t.RemoteAddr, ":")
-			if idx > 0 && zeroPortRe.MatchString(t.RemoteAddr[idx+1:]) {
-				host := t.RemoteAddr[:idx]
+			host, portText, splitErr := net.SplitHostPort(t.RemoteAddr)
+			if t.Protocol != proto.UNIX && splitErr == nil && zeroPortRe.MatchString(portText) {
 				for {
+					if err = session.ctx.Err(); err != nil {
+						goto rollback
+					}
 					port := s.registry.portPool.Get()
-					addr := fmt.Sprintf("%s:%d", host, port)
+					if port == 0 || port > 65535 {
+						err = fmt.Errorf("dynamic port range exhausted: %d", port)
+						goto rollback
+					}
+					addr := net.JoinHostPort(host, strconv.FormatUint(port, 10))
 
-					l, err = net.Listen(t.Protocol, addr)
+					l, err = lc.Listen(session.ctx, t.Protocol, addr)
 					if err != nil {
 						s.logger.Log(
 							"level", 0,
@@ -457,6 +469,9 @@ func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, session *connPair)
 							"addr", addr,
 							"err", err,
 						)
+						if !errors.Is(err, syscall.EADDRINUSE) {
+							goto rollback
+						}
 						continue
 					}
 
@@ -465,7 +480,7 @@ func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, session *connPair)
 					break
 				}
 			} else {
-				l, err = net.Listen(t.Protocol, t.RemoteAddr)
+				l, err = lc.Listen(session.ctx, t.Protocol, t.RemoteAddr)
 				if err != nil {
 					goto rollback
 				}
@@ -489,6 +504,8 @@ func (s *Server) addTunnels(tunnels map[string]*proto.Tunnel, session *connPair)
 	s.connPool.mu.Lock()
 	if s.connPool.conns[s.connPool.addr(identifier)] != session {
 		err = errClientNotConnected
+	} else if session.ctx.Err() != nil {
+		err = session.ctx.Err()
 	} else {
 		err = s.set(i, identifier)
 	}
