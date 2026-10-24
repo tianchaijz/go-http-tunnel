@@ -50,7 +50,7 @@ func (p *connPool) GetClientConn(req *http.Request, addr string) (*http2.ClientC
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	if cp, ok := p.conns[addr]; ok && cp.clientConn.CanTakeNewRequest() {
+	if cp, ok := p.conns[addr]; ok && cp.clientConn.ReserveNewRequest() {
 		return cp.clientConn, nil
 	}
 
@@ -111,7 +111,7 @@ func (p *connPool) AddConn(conn net.Conn, identifier id.ID, tag string) (*connPa
 		err = errClientNotConnected
 	case p.conns[addr] != nil:
 		err = errClientAlreadyConnected
-	case !c.CanTakeNewRequest():
+	case c.State().Closed || !c.CanTakeNewRequest():
 		err = errClientNotConnected
 	}
 	if err != nil {
