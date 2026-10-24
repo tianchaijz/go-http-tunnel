@@ -23,9 +23,12 @@ func NewContext(logger Logger) *Context {
 
 // With returns a new Context with keyvals appended to those of the receiver.
 func (c *Context) With(keyvals ...interface{}) *Context {
+	suffix := make([]interface{}, len(c.suffix)+len(keyvals))
+	copy(suffix, c.suffix)
+	copy(suffix[len(c.suffix):], keyvals)
 	return &Context{
 		prefix: c.prefix,
-		suffix: append(c.suffix, keyvals...),
+		suffix: suffix,
 		logger: c.logger,
 	}
 }
@@ -33,8 +36,11 @@ func (c *Context) With(keyvals ...interface{}) *Context {
 // WithPrefix returns a new Context with keyvals prepended to those of the
 // receiver.
 func (c *Context) WithPrefix(keyvals ...interface{}) *Context {
+	prefix := make([]interface{}, len(c.prefix)+len(keyvals))
+	copy(prefix, c.prefix)
+	copy(prefix[len(c.prefix):], keyvals)
 	return &Context{
-		prefix: append(c.prefix, keyvals...),
+		prefix: prefix,
 		suffix: c.suffix,
 		logger: c.logger,
 	}
@@ -42,7 +48,9 @@ func (c *Context) WithPrefix(keyvals ...interface{}) *Context {
 
 // Log adds prefix and suffix to keyvals and calls internal logger.
 func (c *Context) Log(keyvals ...interface{}) error {
-	s := append(c.prefix, keyvals...)
+	s := make([]interface{}, 0, len(c.prefix)+len(keyvals)+len(c.suffix))
+	s = append(s, c.prefix...)
+	s = append(s, keyvals...)
 	s = append(s, c.suffix...)
 	return c.logger.Log(s...)
 }
