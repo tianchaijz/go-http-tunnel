@@ -18,6 +18,14 @@ func TestNormalizeAddress(t *testing.T) {
 		error    string
 	}{
 		{
+			addr:     "[::1]:5223",
+			expected: "[::1]:5223",
+		},
+		{
+			addr:     "[fe80::1%eth0]:22",
+			expected: "[fe80::1%eth0]:22",
+		},
+		{
 			addr:     "22",
 			expected: "127.0.0.1:22",
 		},
