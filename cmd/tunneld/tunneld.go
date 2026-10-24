@@ -54,6 +54,17 @@ func main() {
 		fatal("failed to create server: %s", err)
 	}
 
+	var dashboardHandler http.Handler
+	if opts.dashboardAddr != "" {
+		dashboardHandler, err = server.DashboardHandler(tunnel.Auth{
+			User:     opts.dashboardUser,
+			Password: os.Getenv("TUNNELD_DASHBOARD_PASSWORD"),
+		})
+		if err != nil {
+			fatal("invalid dashboard credentials: set -dashboardUser to a nonempty username without colons and TUNNELD_DASHBOARD_PASSWORD to a nonempty password")
+		}
+	}
+
 	if !autoSubscribe {
 		for _, c := range strings.Split(opts.clients, ",") {
 			if c == "" {
@@ -101,7 +112,7 @@ func main() {
 	}
 
 	if opts.dashboardAddr != "" {
-		dashboard := startDashboard(opts.dashboardAddr, server.DashboardHandler())
+		dashboard := startDashboard(opts.dashboardAddr, dashboardHandler)
 		defer dashboard.Close()
 	}
 

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mmatczuk/go-http-tunnel"
 )
 
 func TestDashboardPreservesPublicApplicationRoutes(t *testing.T) {
@@ -20,10 +22,16 @@ func TestDashboardPreservesPublicApplicationRoutes(t *testing.T) {
 	public.Client().Timeout = 3 * time.Second
 	client := makeTunnelClient(t, s.Addr(), public.Listener.Addr(), backendHTTP.Addr(), freeAddr(), backendTCP.Addr())
 	defer client.Stop()
+	handler, err := s.DashboardHandler(tunnel.Auth{User: "admin", Password: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		w := httptest.NewRecorder()
-		s.DashboardHandler().ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+		req := httptest.NewRequest("GET", "/", nil)
+		req.SetBasicAuth("admin", "secret")
+		handler.ServeHTTP(w, req)
 		if strings.Contains(w.Body.String(), "共 2 条隧道") {
 			break
 		}

@@ -67,17 +67,39 @@ $ tunneld -tlsCrt .tunneld/server.crt -tlsKey .tunneld/server.key
 
 This will run HTTP server on port `80` and HTTPS (HTTP/2) server on port `443`. If you want to use HTTPS it's recommended to get a properly signed certificate to avoid security warnings.
 
-To enable the Chinese dashboard, add `-dashboardAddr 127.0.0.1:8081` and open
-`http://127.0.0.1:8081/`. It lists registered tunnels, their actual listening
+To enable the Chinese dashboard, set a password in the environment and supply a username:
+
+```bash
+$ export TUNNELD_DASHBOARD_PASSWORD='your-dashboard-password'
+$ tunneld -tlsCrt .tunneld/server.crt -tlsKey .tunneld/server.key -dashboardAddr 127.0.0.1:8081 -dashboardUser admin
+```
+
+Open `http://127.0.0.1:8081/`. It lists registered tunnels, their actual listening
 addresses and TCP ports, and refreshes every ten seconds. HTTP tunnels share the
 public HTTP/HTTPS listeners and have no dedicated port. UNIX sockets have no TCP
 port. The dashboard is disabled by default and uses a separate listener, so public
 application routes remain available.
 
-The dashboard has no authentication. Bind it to loopback or another trusted
-interface. It shows registration snapshots, not backend health, and omits backend
-addresses and credentials. Library users can serve `Server.DashboardHandler()` on
-a separate HTTP server.
+The dashboard requires HTTP Basic authentication with a nonempty username and
+password. Usernames cannot contain colons. There is no password flag or default
+credential. An enabled dashboard with invalid credentials exits before public
+HTTP/HTTPS or dashboard serving starts. A disabled dashboard requires no credentials.
+Basic authentication requires a loopback listener or an HTTPS reverse proxy for
+remote access because HTTP does not encrypt credentials. The dashboard shows
+registration snapshots, not backend health, and omits backend addresses and credentials.
+
+Library users must pass credentials and handle the constructor error before
+serving the handler on a separate HTTP server:
+
+```go
+handler, err := server.DashboardHandler(tunnel.Auth{User: "admin", Password: secret})
+if err != nil {
+    return err
+}
+dashboard := &http.Server{Addr: "127.0.0.1:8081", Handler: handler}
+```
+
+This replaces the previous `Server.DashboardHandler()` signature.
 
 ## Configuration
 

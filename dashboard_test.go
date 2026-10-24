@@ -14,9 +14,16 @@ import (
 	"github.com/mmatczuk/go-http-tunnel/proto"
 )
 
-func dashboardResponse(s *Server, method, path string) *httptest.ResponseRecorder {
+func dashboardResponse(t *testing.T, s *Server, method, path string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
-	s.DashboardHandler().ServeHTTP(w, httptest.NewRequest(method, path, nil))
+	t.Helper()
+	handler, err := s.DashboardHandler(Auth{User: "admin", Password: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(method, path, nil)
+	req.SetBasicAuth("admin", "secret")
+	handler.ServeHTTP(w, req)
 	return w
 }
 
@@ -116,7 +123,7 @@ func TestDashboardFailedRegistrationAndRemoval(t *testing.T) {
 
 func TestDashboardHTTPContractAndEscaping(t *testing.T) {
 	s, session := portTestServer(t, 30000)
-	empty := dashboardResponse(s, "GET", "/")
+	empty := dashboardResponse(t, s, "GET", "/")
 	if !strings.Contains(empty.Body.String(), "暂无已注册隧道") {
 		t.Fatal(empty.Body.String())
 	}
@@ -125,7 +132,7 @@ func TestDashboardHTTPContractAndEscaping(t *testing.T) {
 	if err := s.addTunnels(map[string]*proto.Tunnel{name: {Protocol: proto.HTTP, Host: host, Auth: "UNIQUE_USER:UNIQUE_PASSWORD", Addr: "PRIVATE_BACKEND_MARKER"}}, session); err != nil {
 		t.Fatal(err)
 	}
-	w := dashboardResponse(s, "GET", "/")
+	w := dashboardResponse(t, s, "GET", "/")
 	body := w.Body.String()
 	if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Content-Type") != "text/html; charset=utf-8" {
 		t.Fatal(w.Result())
@@ -140,13 +147,13 @@ func TestDashboardHTTPContractAndEscaping(t *testing.T) {
 			t.Fatalf("missing %q", value)
 		}
 	}
-	if head := dashboardResponse(s, "HEAD", "/"); head.Code != 200 || head.Body.Len() != 0 {
+	if head := dashboardResponse(t, s, "HEAD", "/"); head.Code != 200 || head.Body.Len() != 0 {
 		t.Fatal(head)
 	}
-	if other := dashboardResponse(s, "GET", "/dashboard"); other.Code != 404 {
+	if other := dashboardResponse(t, s, "GET", "/dashboard"); other.Code != 404 {
 		t.Fatal(other)
 	}
-	if post := dashboardResponse(s, "POST", "/"); post.Code != 405 || post.Header().Get("Allow") != "GET, HEAD" {
+	if post := dashboardResponse(t, s, "POST", "/"); post.Code != 405 || post.Header().Get("Allow") != "GET, HEAD" {
 		t.Fatal(post)
 	}
 	for _, path := range []string{"/", "/dashboard"} {
@@ -167,7 +174,7 @@ func TestDashboardConcurrentSnapshots(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 100; i++ {
-			if w := dashboardResponse(s, "GET", "/"); w.Code != 200 {
+			if w := dashboardResponse(t, s, "GET", "/"); w.Code != 200 {
 				t.Errorf("status %d", w.Code)
 			}
 		}
@@ -179,4 +186,55 @@ func TestDashboardConcurrentSnapshots(t *testing.T) {
 		s.disconnectedWithTag(session.identifier, session.tag)
 	}
 	wg.Wait()
+}
+
+func TestDashboardInvalidCredentials(t *testing.T) {
+	for _, auth := range []Auth{{}, {User: "admin"}, {Password: "secret"}, {User: "ad:min", Password: "secret"}} {
+		var s Server
+		handler, err := s.DashboardHandler(auth)
+		if err == nil || handler != nil {
+			t.Fatalf("invalid credentials returned handler %v, error %v", handler, err)
+		}
+	}
+}
+
+func TestDashboardAuthentication(t *testing.T) {
+	s, session := portTestServer(t, 30000)
+	const marker = "PRIVATE_TUNNEL_MARKER"
+	if err := s.addTunnels(map[string]*proto.Tunnel{marker: {Protocol: proto.HTTP, Host: marker + ".example"}}, session); err != nil {
+		t.Fatal(err)
+	}
+	auth := Auth{User: "admin", Password: " secret:with:colons "}
+	handler, err := s.DashboardHandler(auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth.User, auth.Password = "changed", "changed"
+	for _, route := range []struct{ method, path string }{{"GET", "/"}, {"HEAD", "/"}, {"POST", "/"}, {"GET", "/missing"}, {"DELETE", "/missing"}} {
+		for _, authorization := range []string{"", "Basic !!!", "Basic YWRtaW4=", "Bearer secret", "Basic OmFkbWlu", "Basic YWRtaW46d3Jvbmc=", "Basic d3Jvbmc6IHNlY3JldDp3aXRoOmNvbG9ucyA="} {
+			req := httptest.NewRequest(route.method, route.path, nil)
+			req.Header.Set("Authorization", authorization)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != http.StatusUnauthorized || w.Header().Get("WWW-Authenticate") != `Basic realm="Tunnel dashboard"` || w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("%s %s unauthorized response: %v", route.method, route.path, w.Result())
+			}
+			if w.Body.String() != "Unauthorized\n" || strings.Contains(w.Body.String(), marker) {
+				t.Fatalf("unexpected denial body %q", w.Body.String())
+			}
+		}
+	}
+	for _, credentials := range []Auth{{User: "admin", Password: " secret:with:colons "}, auth} {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.SetBasicAuth(credentials.User, credentials.Password)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if credentials.User == "admin" {
+			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), marker) {
+				t.Fatalf("original credentials failed: %v", w.Result())
+			}
+		} else if w.Code != http.StatusUnauthorized {
+			t.Fatalf("mutated credentials accepted: %v", w.Result())
+		}
+	}
 }

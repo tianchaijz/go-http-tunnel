@@ -2,10 +2,14 @@ package tunnel
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"crypto/subtle"
+	"errors"
 	"html/template"
 	"net"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/mmatczuk/go-http-tunnel/id"
@@ -57,10 +61,25 @@ func (r *registry) dashboardSnapshot() []dashboardTunnel {
 }
 
 // DashboardHandler returns a read-only view of registered tunnels for a separate
-// HTTP listener. The handler has no authentication; bind it to a trusted interface.
-func (s *Server) DashboardHandler() http.Handler {
+// HTTP listener. Credentials are required and captured when the handler is created.
+func (s *Server) DashboardHandler(auth Auth) (http.Handler, error) {
+	if auth.User == "" || auth.Password == "" || strings.Contains(auth.User, ":") {
+		return nil, errors.New("dashboard requires a nonempty username without colons and a nonempty password")
+	}
+	expectedUser := sha256.Sum256([]byte(auth.User))
+	expectedPassword := sha256.Sum256([]byte(auth.Password))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
+		user, password, ok := r.BasicAuth()
+		userHash := sha256.Sum256([]byte(user))
+		passwordHash := sha256.Sum256([]byte(password))
+		userMatch := subtle.ConstantTimeCompare(userHash[:], expectedUser[:])
+		passwordMatch := subtle.ConstantTimeCompare(passwordHash[:], expectedPassword[:])
+		if !ok || userMatch&passwordMatch != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Tunnel dashboard"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
@@ -83,7 +102,7 @@ func (s *Server) DashboardHandler() http.Handler {
 		if r.Method == http.MethodGet {
 			w.Write(body.Bytes())
 		}
-	})
+	}), nil
 }
 
 var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype html>

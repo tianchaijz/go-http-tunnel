@@ -40,6 +40,7 @@ func init() {
 type options struct {
 	httpAddr          string
 	dashboardAddr     string
+	dashboardUser     string
 	httpsAddr         string
 	tunnelAddr        string
 	tlsCrt            string
@@ -54,6 +55,7 @@ type options struct {
 
 func parseArgs() *options {
 	dashboardAddr := flag.String("dashboardAddr", "", "Dashboard listening address, empty string to disable (example 127.0.0.1:8081)")
+	dashboardUser := flag.String("dashboardUser", "", "Dashboard Basic auth username; password is required in TUNNELD_DASHBOARD_PASSWORD")
 	httpAddr := flag.String("httpAddr", ":80", "Public address for HTTP connections, empty string to disable")
 	httpsAddr := flag.String("httpsAddr", ":443", "Public address listening for HTTPS connections, emptry string to disable")
 	tunnelAddr := flag.String("tunnelAddr", ":5223", "Public address listening for tunnel client")
@@ -71,6 +73,7 @@ func parseArgs() *options {
 	return &options{
 		httpAddr:          *httpAddr,
 		dashboardAddr:     *dashboardAddr,
+		dashboardUser:     *dashboardUser,
 		httpsAddr:         *httpsAddr,
 		tunnelAddr:        *tunnelAddr,
 		tlsCrt:            *tlsCrt,

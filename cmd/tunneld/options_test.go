@@ -12,11 +12,16 @@ func TestDashboardFlag(t *testing.T) {
 	for _, tt := range []struct {
 		args []string
 		want string
-	}{{nil, ""}, {[]string{"-dashboardAddr", "127.0.0.1:8081"}, "127.0.0.1:8081"}} {
+		user string
+	}{{nil, "", ""}, {[]string{"-dashboardAddr", "127.0.0.1:8081", "-dashboardUser", "admin"}, "127.0.0.1:8081", "admin"}} {
 		flag.CommandLine = flag.NewFlagSet("tunneld", flag.ContinueOnError)
 		os.Args = append([]string{"tunneld"}, tt.args...)
-		if got := parseArgs().dashboardAddr; got != tt.want {
-			t.Fatalf("dashboardAddr=%q want %q", got, tt.want)
+		opts := parseArgs()
+		if opts.dashboardAddr != tt.want || opts.dashboardUser != tt.user {
+			t.Fatalf("dashboardAddr=%q dashboardUser=%q", opts.dashboardAddr, opts.dashboardUser)
+		}
+		if flag.CommandLine.Lookup("dashboardPassword") != nil {
+			t.Fatal("password must not have a command-line flag")
 		}
 	}
 }
