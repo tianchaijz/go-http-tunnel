@@ -135,8 +135,13 @@ func TestClient_StopActiveSessionAndRestart(t *testing.T) {
 	c := lifecycleClient(t)
 	c.Stop()
 	for i := 0; i < 2; i++ {
+		if i == 1 {
+			c.config.ServeBackoff = &notifiedBackoff{waiting: make(chan struct{}, 1)}
+		}
 		conn, peer := net.Pipe()
+		dials := 0
 		c.config.DialTLS = func(string, string, *tls.Config) (net.Conn, error) {
+			dials++
 			return conn, nil
 		}
 		done := startClient(c)
@@ -155,6 +160,9 @@ func TestClient_StopActiveSessionAndRestart(t *testing.T) {
 		}
 		stopClient(t, c)
 		awaitClient(t, done)
+		if dials != 1 {
+			t.Errorf("dial count after Stop = %d, want 1", dials)
+		}
 		peer.Close()
 		c.Stop()
 	}

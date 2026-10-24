@@ -218,7 +218,8 @@ func testHTTP(t testing.TB, addr net.Addr, payload []byte, repeat uint) {
 
 		resp, err := http.DefaultClient.Do(r)
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 		if resp.StatusCode != http.StatusOK {
 			t.Error("Unexpected status code", resp)

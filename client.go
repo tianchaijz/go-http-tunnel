@@ -64,13 +64,13 @@ type Client struct {
 type clientRun struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
-	session *clientSession // guarded by Client.mu
+	session *clientSession
 }
 
 type clientSession struct {
 	conn          net.Conn
-	lastHeartbeat time.Time // guarded by Client.mu
-	serverErr     error     // guarded by Client.mu
+	lastHeartbeat time.Time
+	serverErr     error
 }
 
 // NewClient creates a new unconnected Client based on configuration. Caller
